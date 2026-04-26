@@ -1,0 +1,13 @@
+{
+    "drug_name": "Aspirin",
+    "timestamp": "2026-04-25 11:56:56",
+    "physics_results": {
+        "clint": 2000.0,
+        "fup": 0.001,
+        "risk_flags": [
+            "Liver: 100%",
+            "GI: 100%"
+        ]
+    },
+    "clinical_interpretation": "Here's a breakdown of the PBPK simulation results and an honest summary:\n\n1. **Metabolic Flux vs. Toxic Damage:**  \"Metabolic flux\" refers to the rate at which a drug is metabolized by the body, while \"toxic damage\" refers to the potential harm caused by that metabolism. High metabolic flux indicates a rapid breakdown of the drug into its active metabolites, potentially leading to toxicity. \n2. **CLint and Pro-Drug Activation:**  A high CLint (clearance) suggests a faster rate of drug elimination from the body. This is not necessarily indicative of rapid pro-drug activation like Aspirin's conversion to Salicylate. However, it does highlight that the drug will be metabolized quickly, potentially leading to higher levels of active metabolites in the liver and GI tract. \n3. **Honest Summary:**  \"The PBPK simulation indicates a high metabolic flux for Aspirin, which could lead to increased exposure to its active metabolites in the liver and GI tract. However, this doesn't necessarily indicate toxicity risk. Further investigation is needed to assess potential drug-specific toxicities.\" \n\n\nLet me know if you have any other questions! \n"
+}
