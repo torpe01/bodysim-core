@@ -218,6 +218,7 @@ HEPATIC_TRANSPORTERS = {
         "Vmax": 45.0,      # pmol/min/mg protein
         "Km": 8.3,         # μM
         "abundance": 3.5,  # pmol/mg membrane protein
+        "default_scale": 0.35,  # IVIVE scale for hepatic biliary excretion (Gertz 2010)
         "substrate_rules": {
             # SAR rules from literature (Kalliokoski & Niemi, Pharmacogenomics 2009)
             "required": ["anionic_or_zwitterionic", "amphipathic"],
@@ -230,6 +231,7 @@ HEPATIC_TRANSPORTERS = {
         "Vmax": 38.0,
         "Km": 12.5,
         "abundance": 1.8,
+        "default_scale": 0.32,  # Hepatic uptake, similar to OATP1B1 but lower abundance
         "substrate_rules": {
             "required": ["anionic"],
             "favorable": {"mw_range": (300, 800), "logp_range": (-1, 5)},
@@ -240,6 +242,7 @@ HEPATIC_TRANSPORTERS = {
         "Vmax": 120.0,
         "Km": 35.0,
         "abundance": 7.5,
+        "default_scale": 0.28,  # Hepatic cation uptake, different tissue localization
         "substrate_rules": {
             # Koepsell et al., Pharmacol Rev 2007
             "required": ["cationic"],
@@ -252,6 +255,7 @@ HEPATIC_TRANSPORTERS = {
         "Vmax": 25.0,
         "Km": 45.0,
         "abundance": 5.2,
+        "default_scale": 0.30,  # Efflux transport, moderate scaling
         "substrate_rules": {
             "required": ["anionic_conjugate"],  # Glutathione/glucuronide conjugates
             "favorable": {"mw_range": (400, 1000)},
@@ -265,6 +269,7 @@ RENAL_TRANSPORTERS = {
         "Vmax": 95.0,      # Uwai et al., J Pharmacol Exp Ther 2000
         "Km": 28.0,
         "abundance": 8.5,
+        "default_scale": 0.30,  # Renal anionic secretion, commonly overpredicts in vitro
         "substrate_rules": {
             "required": ["anionic"],
             "favorable": {"mw_range": (150, 500), "logp_range": (-2, 3)},
@@ -276,6 +281,7 @@ RENAL_TRANSPORTERS = {
         "Vmax": 110.0,
         "Km": 32.0,
         "abundance": 6.8,
+        "default_scale": 0.32,  # Renal anionic secretion, similar to OAT1
         "substrate_rules": {
             "required": ["anionic"],
             "favorable": {"mw_range": (200, 600), "logp_range": (-1, 4)},
@@ -286,6 +292,7 @@ RENAL_TRANSPORTERS = {
         "Vmax": 150.0,     # Kimura et al., Drug Metab Pharmacokinet 2005
         "Km": 40.0,
         "abundance": 12.0,
+        "default_scale": 0.25,  # Renal cationic secretion, high abundance, lower in vivo scaling
         "substrate_rules": {
             "required": ["cationic"],
             "favorable": {"mw_range": (100, 500), "logp_range": (-3, 2)},
@@ -297,6 +304,7 @@ RENAL_TRANSPORTERS = {
         "Vmax": 80.0,
         "Km": 55.0,
         "abundance": 4.5,
+        "default_scale": 0.28,  # Apical efflux (secondary transporter), moderate scale
         "substrate_rules": {
             "required": ["cationic"],
             "favorable": {"mw_range": (100, 400)},
@@ -790,6 +798,7 @@ def estimate_kp_values(logp, fup, pka=None, drug_type="neutral", mw=300.0,
                 "Vmax": trans_data["Vmax"] * trans_data["abundance"],
                 "Km": trans_data["Km"] * pred["affinity_modifier"],
                 "probability": pred["probability"],
+                "default_scale": trans_data["default_scale"],  # ← CRITICAL: IVIVE scaling factor
                 "method": pred.get("method", "gaussian"),
                 "similarity": pred.get("similarity")
             }
@@ -802,6 +811,7 @@ def estimate_kp_values(logp, fup, pka=None, drug_type="neutral", mw=300.0,
                 "Vmax": trans_data["Vmax"] * trans_data["abundance"],
                 "Km": trans_data["Km"] * pred["affinity_modifier"],
                 "probability": pred["probability"],
+                "default_scale": trans_data["default_scale"],  # ← CRITICAL: IVIVE scaling factor
                 "method": pred.get("method", "gaussian"),
                 "similarity": pred.get("similarity")
             }
