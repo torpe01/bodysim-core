@@ -27,26 +27,27 @@ CHANGES FROM v2.1 → v2.2
   - Each has own blood flow and volume
 
 ─────────────────────────────────────────────────────────────────────────────
-STATE VECTOR (18 elements - expanded from 14)
+STATE VECTOR (19 elements - Permeability-Limited 2-Compartment Liver)
 ─────────────────────────────────────────────────────────────────────────────
   y[0]  = C_arterial         mg/L  arterial blood plasma
   y[1]  = C_venous           mg/L  venous blood plasma
   y[2]  = C_venous_delay     mg/L  venous circulation delay compartment (NEW)
   y[3]  = C_lung             mg/L  lung tissue
-  y[4]  = C_liver            mg/L  liver tissue
-  y[5]  = C_kidney           mg/L  kidney tissue
-  y[6]  = C_brain            mg/L  brain tissue
-  y[7]  = C_heart            mg/L  heart tissue
-  y[8]  = C_muscle           mg/L  muscle tissue
-  y[9]  = C_fat              mg/L  fat tissue
-  y[10] = C_gut_enterocyte   mg/L  gut enterocyte (intracellular) (RENAMED)
-  y[11] = C_skin             mg/L  skin tissue
-  y[12] = C_bone             mg/L  bone tissue
-  y[13] = C_spleen           mg/L  spleen tissue (NEW - was in "rest")
-  y[14] = C_adipose_mes      mg/L  mesenteric adipose (NEW - was in "rest")
-  y[15] = C_pancreas         mg/L  pancreas (NEW - was in "rest")
-  y[16] = A_gut_lumen_abs    mg    drug in gut lumen awaiting absorption
-  y[17] = A_gut_lumen_efflux mg    drug effluxed back to lumen by P-gp (NEW)
+  y[4]  = C_liv_vasc         mg/L  liver vascular (sinusoidal blood) (RENAMED)
+  y[5]  = C_liv_tiss         mg/L  liver tissue (hepatocytes) (NEW)
+  y[6]  = C_kidney           mg/L  kidney tissue
+  y[7]  = C_brain            mg/L  brain tissue
+  y[8]  = C_heart            mg/L  heart tissue
+  y[9]  = C_muscle           mg/L  muscle tissue
+  y[10] = C_fat              mg/L  fat tissue
+  y[11] = C_gut_enterocyte   mg/L  gut enterocyte (intracellular) (RENAMED)
+  y[12] = C_skin             mg/L  skin tissue
+  y[13] = C_bone             mg/L  bone tissue
+  y[14] = C_spleen           mg/L  spleen tissue (NEW - was in "rest")
+  y[15] = C_adipose_mes      mg/L  mesenteric adipose (NEW - was in "rest")
+  y[16] = C_pancreas         mg/L  pancreas (NEW - was in "rest")
+  y[17] = A_gut_lumen_abs    mg    drug in gut lumen awaiting absorption
+  y[18] = A_gut_lumen_efflux mg    drug effluxed back to lumen by P-gp (NEW)
 
 ─────────────────────────────────────────────────────────────────────────────
 PRIMARY SOURCES
@@ -63,16 +64,16 @@ from scipy.integrate import solve_ivp
 
 # ── State vector indices ───────────────────────────────────────────────────
 ART  = 0;  VEN  = 1;  VEN_DELAY = 2; LUNG = 3
-LIV  = 4;  KID  = 5;  BRA  = 6
-HRT  = 7;  MUS  = 8;  FAT  = 9
-GUT_ENTER = 10;  SKN  = 11; BON  = 12
-SPL  = 13; ADIP_MES = 14; PANC = 15
-GLU_ABS  = 16; GLU_EFF = 17
-N_STATES = 18
+LIV_VASC = 4;  LIV_TISS = 5;  KID  = 6;  BRA  = 7
+HRT  = 8;  MUS  = 9;  FAT  = 10
+GUT_ENTER = 11;  SKN  = 12; BON  = 13
+SPL  = 14; ADIP_MES = 15; PANC = 16
+GLU_ABS  = 17; GLU_EFF = 18
+N_STATES = 19
 
 ORGAN_NAMES = [
     "arterial", "venous", "venous_delay", "lung",
-    "liver", "kidney", "brain",
+    "liver_vascular", "liver_tissue", "kidney", "brain",
     "heart", "muscle", "fat",
     "gut_enterocyte", "skin", "bone",
     "spleen", "adipose_mesenteric", "pancreas",
@@ -80,7 +81,7 @@ ORGAN_NAMES = [
 ]
 
 TISSUE_COMPARTMENTS = {
-    LIV: "liver", KID: "kidney", BRA: "brain",
+    LIV_VASC: "liver_vasc", LIV_TISS: "liver_tiss", KID: "kidney", BRA: "brain",
     HRT: "heart", MUS: "muscle", FAT: "fat",
     GUT_ENTER: "gut", SKN: "skin", BON: "bone",
     SPL: "spleen", ADIP_MES: "adipose_mes", PANC: "pancreas",
@@ -154,6 +155,10 @@ class PBPKModel:
             "rest_flow_split_spleen": 0.3,      # Fraction of 'Rest' cardiac flow to Spleen
             "rest_flow_split_adipose_mes": 0.4, # Fraction of 'Rest' cardiac flow to Mesenteric Fat
             "rest_flow_split_pancreas": 0.3,    # Fraction of 'Rest' cardiac flow to Pancreas
+            
+            # --- LIVER PERMEABILITY-LIMITED 2-COMPARTMENT (v2.3+) ---
+            # Dynamic CL_pd based on logP (v2.4 fix: solves Propranolol bottleneck)
+            "liver_CL_pd": None,  # Will be calculated from drug logP in __init__
         }
         
         # Merge user params with defaults
@@ -165,6 +170,27 @@ class PBPKModel:
             raise ValueError("params must include 'egfr' (eGFR in mL/min)")
         if "cyp3a4_activity" not in merged:
             raise ValueError("params must include 'cyp3a4_activity'")
+        
+        # Dynamically calculate liver_CL_pd based on drug logP (v2.5 fix)
+        # This fixes the Propranolol/Atorvastatin bottleneck: highly lipophilic drugs
+        # now become "flow-limited" (permeability >> blood flow), allowing hepatic
+        # extraction to be governed by enzyme capacity and blood flow, not diffusion
+        if merged["liver_CL_pd"] is None:
+            logp = self.drug.get("logp", 0.0)
+            
+            if logp < 0:
+                # Hydrophilic drugs: use exponential formula (keeps them restricted)
+                # logp=-2 → 1.7 L/h, logp=-1 → 3.1 L/h
+                cl_pd = float(np.clip(5.0 * np.exp(logp / 2.0), 1.0, 10.0))
+            else:
+                # Lipophilic drugs: use base-10 exponential (makes them flow-limited)
+                # logp=0 → 10 L/h, logp=1 → 100 L/h, logp=2 → 1000 L/h
+                # logp=3.5 (Propranolol) → 31,600 (capped at 1500)
+                # logp=4 (Atorvastatin) → 100,000 (capped at 1500)
+                # This ensures: CL_pd >> Q_liver (90 L/h) for truly lipophilic drugs
+                cl_pd = float(np.clip(10.0 * (10 ** logp), 10.0, 1500.0))
+            
+            merged["liver_CL_pd"] = cl_pd
         
         return merged
 
@@ -428,7 +454,8 @@ class PBPKModel:
         C_ven = y[VEN]
         C_ven_delay = y[VEN_DELAY]
         C_lung = y[LUNG]
-        C_liv = y[LIV]
+        C_liv_vasc = y[LIV_VASC]
+        C_liv_tiss = y[LIV_TISS]
         C_kid = y[KID]
         C_bra = y[BRA]
         C_hrt = y[HRT]
@@ -472,11 +499,13 @@ class PBPKModel:
         CO = q["cardiac_output"]
 
         # ── Clearances ─────────────────────────────────────────────────────
-        CLh = self._hepatic_clearance(C_liv)
+        CLh = self.drug["CLint"]  # Intrinsic hepatic clearance (used in tissue metabolism)
         cl_filt = tp["cl_filt"]
 
         # ── Free concentrations ────────────────────────────────────────────
         C_portal_free = fup * C_gut_enter / kp["gut"]
+        C_vascular_free = fup * C_liv_vasc  # Free concentration in liver vascular space
+        C_tissue_free = fup * C_liv_tiss / kp["liver"]  # Free concentration in liver tissue
         C_art_free = fup * C_art
         C_kid_free = fup * C_kid / kp["kidney"]
 
@@ -516,22 +545,50 @@ class PBPKModel:
             - self._pgp_efflux_rate(C_gut_enter)  # P-gp pumping out
         )
 
-        # ── [LIV] Liver ────────────────────────────────────────────────────
-        # FIXED v2.2: Do NOT multiply C_portal_free by kp["liver"]
-        # C_portal_free already accounts for Kp partition. Incoming flow uses blood conc.
-        passive_liv = (
-            Q_ha * C_art + Q_pv * C_gut_blood_out
-            - Q_liv * (C_liv / kp["liver"])
-        ) / v["liver"]
-
+        # ── [LIV_VASC] Liver Vascular (Sinusoidal Blood) ────────────────────
+        # Volumes: 15% vascular, 85% cellular (standard liver physiology)
+        v_liv_vasc = v["liver"] * 0.15
+        v_liv_tiss = v["liver"] * 0.85
+        
+        # Active uptake clearance from vascular space (transporter-mediated)
         active_uptake_liv = 0.0
         for name, trans in tp["hepatic_uptake"].items():
-            cl_act = self._active_cl(trans, C_portal_free)
-            active_uptake_liv += cl_act * C_portal_free / v["liver"]
-
-        cl_h_sink = CLh * (C_liv / kp["liver"]) / v["liver"]
-
-        dydt[LIV] = passive_liv + active_uptake_liv - cl_h_sink
+            cl_act = self._active_cl(trans, C_vascular_free)
+            active_uptake_liv += cl_act
+        
+        # Passive diffusion clearance across hepatocyte membrane (L/h)
+        # Now dynamic based on drug logP (v2.4 fix for Propranolol bottleneck)
+        CL_pd = self.params.get("liver_CL_pd", 10.0)
+        
+        # Passive diffusion flux: CL_pd * (free_vascular - free_tissue)
+        # Bidirectional: drives drug equilibration across hepatocyte membrane
+        # For drugs with active transporters: passive diffusion = "background" flux
+        # For passively permeable drugs (like Metoprolol): passive diffusion = DOMINANT pathway
+        # Sign convention: positive flux = drug moves from vascular → tissue
+        passive_diffusion = CL_pd * (C_vascular_free - C_tissue_free)
+        
+        # Vascular compartment mass balance:
+        # Inflow from arteries + portal blood, outflow to venous + active/passive transport
+        dydt[LIV_VASC] = (
+            Q_ha * C_art + Q_pv * C_gut_blood_out  # Inflow from circulation
+            - Q_liv * C_liv_vasc  # Outflow to venous (total concentration, NOT partitioned)
+            - active_uptake_liv * C_vascular_free  # Pumped into tissue (saturable, ATP-dependent)
+            - passive_diffusion  # Passively diffused (bidirectional, sign-aware)
+        ) / v_liv_vasc
+        
+        # ── [LIV_TISS] Liver Tissue (Hepatocytes) ──────────────────────────
+        # Tissue compartment receives drug from vascular via active uptake and passive diffusion
+        # Tissue compartment loses drug via metabolism (intrinsic clearance at tissue conc)
+        
+        # Hepatic metabolism in tissue (based on free tissue concentration)
+        cl_h_sink = CLh * C_tissue_free
+        
+        # Tissue mass balance: inflow (uptake + passive diffusion) - outflow (metabolism)
+        dydt[LIV_TISS] = (
+            active_uptake_liv * C_vascular_free  # Pumped from vascular (saturable)
+            + passive_diffusion  # Passively diffused from vascular (bidirectional, sign-aware)
+            - cl_h_sink  # Metabolized by CYP enzymes (intrinsic clearance)
+        ) / v_liv_tiss
 
         # ── [KID] Kidney ───────────────────────────────────────────────────
         passive_kid = (Q_kid / v["kidney"]) * (C_art - C_kid / kp["kidney"])
@@ -557,8 +614,10 @@ class PBPKModel:
         dydt[PANC] = (Q_panc / v.get("pancreas", 0.1)) * (C_art - C_panc / kp.get("pancreas", 1.0))
 
         # ── [VEN] Venous blood ─────────────────────────────────────────────
+        # FIXED v2.3: Liver contribution now comes from LIV_VASC (vascular) not tissue
+        # This ensures only unuptaken drug returns to venous circulation
         venous_inflow = (
-            Q_liv * (C_liv / kp["liver"])
+            Q_liv * C_liv_vasc  # Outflow from liver vascular space
             + Q_kid * (C_kid / kp["kidney"])
             + Q_bra * (C_bra / kp["brain"])
             + Q_hrt * (C_hrt / kp["heart"])
@@ -652,7 +711,8 @@ class PBPKModel:
 
         plasma = Y[ART]
         organs = {
-            "liver": Y[LIV],
+            "liver_vascular": Y[LIV_VASC],
+            "liver_tissue": Y[LIV_TISS],
             "kidney": Y[KID],
             "brain": Y[BRA],
             "heart": Y[HRT],
@@ -695,6 +755,8 @@ class PBPKModel:
             "transporter_scale_factor": self.params["transporter_scale_factor"],
             "default_renal_km_um": self.params["default_renal_km_um"],
             "pgp_km_um": self.params["pgp_km_um"],
+            "liver_cl_pd": self.params.get("liver_CL_pd", 10.0),  # Passive diffusion in liver
+            "liver_model": "permeability-limited 2-compartment (v2.3+)",
         }
         
         # P-gp efflux mass balance

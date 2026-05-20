@@ -34,13 +34,11 @@ def run_qualification_suite():
                 mw=data["mw"],
                 pka=data.get("pka"),
                 drug_type=data.get("drug_type", "neutral"),
-                smiles=data["smiles"],       # For fingerprint matching
+                smiles=data["smiles"]       # For fingerprint matching
                 
-                # Clinical PK data overrides (from literature/measured data)
-                ka_override=data.get("ka"),
-                F_override=data.get("F"),
-                clint_override=data.get("CLint"),
-                clrenal_override=data.get("CLrenal")
+                # REMOVED: ka_override, F_override, clint_override, clrenal_override
+                # We must test MECHANISTIC predictions, not hardcoded literature values
+                # The reference_pk.py values are ground truth for validation, not model inputs
             )
 
             # 2. FIXED: Run Simulation using run_single()
