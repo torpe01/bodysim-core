@@ -513,6 +513,16 @@ class PBPKModel:
         # Used in mass balance: tissue → blood (across Kp gradient)
         C_gut_blood_out = C_gut_enter / kp["gut"]  # Total plasma conc leaving gut
 
+        # ── Blood concentrations (for macroscopic flow) ─────────────────────
+        # Macroscopic flows (Q) are in whole blood L/h, so must be multiplied by
+        # blood concentrations (C * Rb), not plasma concentrations (C).
+        # This corrects the mass balance for drugs that partition into RBCs (Rb > 1).
+        C_art_blood = C_art * Rb
+        C_ven_blood = C_ven * Rb
+        C_ven_delay_blood = C_ven_delay * Rb
+        C_gut_blood_out_blood = C_gut_blood_out * Rb
+        C_liv_vasc_blood = C_liv_vasc * Rb
+
         # ── Absorption ─────────────────────────────────────────────────────
         ka = self.drug["ka"]
         F = self.drug["F"]
@@ -539,7 +549,7 @@ class PBPKModel:
 
         # ── [GUT_ENTER] Gut enterocyte (intracellular) ────────────────────
         dydt[GUT_ENTER] = (
-            (Q_gut / v["gut"]) * (C_art - C_gut_enter / kp["gut"])
+            (Q_gut / v["gut"]) * (C_art_blood - (C_gut_enter / kp["gut"]) * Rb)
             + ka * A_glu_abs * F / v["gut"]  # Absorption from primary depot
             + ka_reabs * A_glu_eff * F / v["gut"]  # Re-absorption from efflux depot
             - self._pgp_efflux_rate(C_gut_enter)  # P-gp pumping out
@@ -570,8 +580,8 @@ class PBPKModel:
         # Vascular compartment mass balance:
         # Inflow from arteries + portal blood, outflow to venous + active/passive transport
         dydt[LIV_VASC] = (
-            Q_ha * C_art + Q_pv * C_gut_blood_out  # Inflow from circulation
-            - Q_liv * C_liv_vasc  # Outflow to venous (total concentration, NOT partitioned)
+            Q_ha * C_art_blood + Q_pv * C_gut_blood_out_blood  # Inflow from circulation (in blood units)
+            - Q_liv * C_liv_vasc_blood  # Outflow to venous (in blood units)
             - active_uptake_liv * C_vascular_free  # Pumped into tissue (saturable, ATP-dependent)
             - passive_diffusion  # Passively diffused (bidirectional, sign-aware)
         ) / v_liv_vasc
@@ -591,7 +601,7 @@ class PBPKModel:
         ) / v_liv_tiss
 
         # ── [KID] Kidney ───────────────────────────────────────────────────
-        passive_kid = (Q_kid / v["kidney"]) * (C_art - C_kid / kp["kidney"])
+        passive_kid = (Q_kid / v["kidney"]) * (C_art_blood - (C_kid / kp["kidney"]) * Rb)
 
         active_sec_kid = 0.0
         for name, trans in tp["renal_secretion"].items():
@@ -601,66 +611,69 @@ class PBPKModel:
         dydt[KID] = passive_kid - active_sec_kid
 
         # ── Standard passive compartments ──────────────────────────────────
-        dydt[BRA] = (Q_bra / v["brain"]) * (C_art - C_bra / kp["brain"])
-        dydt[HRT] = (Q_hrt / v["heart"]) * (C_art - C_hrt / kp["heart"])
-        dydt[MUS] = (Q_mus / v["muscle"]) * (C_art - C_mus / kp["muscle"])
-        dydt[FAT] = (Q_fat / v["fat"]) * (C_art - C_fat / kp["fat"])
-        dydt[SKN] = (Q_skn / v["skin"]) * (C_art - C_skn / kp["skin"])
-        dydt[BON] = (Q_bon / v["bone"]) * (C_art - C_bon / kp["bone"])
+        dydt[BRA] = (Q_bra / v["brain"]) * (C_art_blood - (C_bra / kp["brain"]) * Rb)
+        dydt[HRT] = (Q_hrt / v["heart"]) * (C_art_blood - (C_hrt / kp["heart"]) * Rb)
+        dydt[MUS] = (Q_mus / v["muscle"]) * (C_art_blood - (C_mus / kp["muscle"]) * Rb)
+        dydt[FAT] = (Q_fat / v["fat"]) * (C_art_blood - (C_fat / kp["fat"]) * Rb)
+        dydt[SKN] = (Q_skn / v["skin"]) * (C_art_blood - (C_skn / kp["skin"]) * Rb)
+        dydt[BON] = (Q_bon / v["bone"]) * (C_art_blood - (C_bon / kp["bone"]) * Rb)
 
         # ── NEW: Specific "rest" organs ────────────────────────────────────
-        dydt[SPL] = (Q_spl / v.get("spleen", 0.2)) * (C_art - C_spl / kp.get("spleen", 1.0))
-        dydt[ADIP_MES] = (Q_adip_mes / v.get("adipose_mes", 0.5)) * (C_art - C_adip_mes / kp.get("adipose_mes", kp["fat"]))
-        dydt[PANC] = (Q_panc / v.get("pancreas", 0.1)) * (C_art - C_panc / kp.get("pancreas", 1.0))
+        dydt[SPL] = (Q_spl / v.get("spleen", 0.2)) * (C_art_blood - (C_spl / kp.get("spleen", 1.0)) * Rb)
+        dydt[ADIP_MES] = (Q_adip_mes / v.get("adipose_mes", 0.5)) * (C_art_blood - (C_adip_mes / kp.get("adipose_mes", kp["fat"])) * Rb)
+        dydt[PANC] = (Q_panc / v.get("pancreas", 0.1)) * (C_art_blood - (C_panc / kp.get("pancreas", 1.0)) * Rb)
 
         # ── [VEN] Venous blood ─────────────────────────────────────────────
         # FIXED v2.3: Liver contribution now comes from LIV_VASC (vascular) not tissue
         # This ensures only unuptaken drug returns to venous circulation
+        # FIXED v2.4: Apply Rb to all tissue outflows for correct mass balance
         venous_inflow = (
-            Q_liv * C_liv_vasc  # Outflow from liver vascular space
-            + Q_kid * (C_kid / kp["kidney"])
-            + Q_bra * (C_bra / kp["brain"])
-            + Q_hrt * (C_hrt / kp["heart"])
-            + Q_mus * (C_mus / kp["muscle"])
-            + Q_fat * (C_fat / kp["fat"])
-            + Q_skn * (C_skn / kp["skin"])
-            + Q_bon * (C_bon / kp["bone"])
-            + Q_spl * (C_spl / kp.get("spleen", 1.0))
-            + Q_adip_mes * (C_adip_mes / kp.get("adipose_mes", kp["fat"]))
-            + Q_panc * (C_panc / kp.get("pancreas", 1.0))
+            Q_liv * C_liv_vasc_blood  # Outflow from liver vascular space
+            + Q_kid * (C_kid / kp["kidney"]) * Rb
+            + Q_bra * (C_bra / kp["brain"]) * Rb
+            + Q_hrt * (C_hrt / kp["heart"]) * Rb
+            + Q_mus * (C_mus / kp["muscle"]) * Rb
+            + Q_fat * (C_fat / kp["fat"]) * Rb
+            + Q_skn * (C_skn / kp["skin"]) * Rb
+            + Q_bon * (C_bon / kp["bone"]) * Rb
+            + Q_spl * (C_spl / kp.get("spleen", 1.0)) * Rb
+            + Q_adip_mes * (C_adip_mes / kp.get("adipose_mes", kp["fat"])) * Rb
+            + Q_panc * (C_panc / kp.get("pancreas", 1.0)) * Rb
         )
 
         if self.params["venous_delay_enabled"]:
             # With delay: venous → delay → lung
             dydt[VEN] = (
                 venous_inflow
-                - CO * C_ven  # Outflow to delay compartment
+                - CO * C_ven_blood  # Outflow to delay compartment (in blood units)
                 - cl_filt * fup * C_ven
             ) / v["venous_blood"]
             
             # Venous delay compartment (first-order transit)
             tau = self.params["venous_delay_tau_h"]
-            dydt[VEN_DELAY] = (CO * C_ven - CO * C_ven_delay) / (tau * CO)
+            dydt[VEN_DELAY] = (CO * C_ven_blood - CO * C_ven_delay_blood) / (tau * CO)
             
-            # Lung receives from delay compartment
-            lung_inflow = C_ven_delay
+            # Lung receives from delay compartment (in blood units)
+            lung_inflow = C_ven_delay_blood
         else:
             # No delay: venous → lung directly
             dydt[VEN] = (
                 venous_inflow
-                - CO * C_ven
+                - CO * C_ven_blood  # Outflow to lung (in blood units)
                 - cl_filt * fup * C_ven
             ) / v["venous_blood"]
             
             dydt[VEN_DELAY] = 0.0  # Unused
-            lung_inflow = C_ven
+            lung_inflow = C_ven_blood  # In blood units
 
         # ── [LUNG] ─────────────────────────────────────────────────────────
-        dydt[LUNG] = (CO * lung_inflow - CO * (C_lung / kp["lung"])) / v["lung"]
+        # lung_inflow is already in blood units; outflow must also be multiplied by Rb
+        dydt[LUNG] = (CO * lung_inflow - CO * (C_lung / kp["lung"]) * Rb) / v["lung"]
 
         # ── [ART] Arterial blood ───────────────────────────────────────────
+        # Both inflow (from lung) and outflow (to systemic) must be in blood units
         dydt[ART] = (
-            CO * (C_lung / kp["lung"]) - CO * C_art
+            CO * (C_lung / kp["lung"]) * Rb - CO * C_art_blood
         ) / v["arterial_blood"]
 
         return dydt
@@ -685,7 +698,11 @@ class PBPKModel:
         y0 = np.zeros(N_STATES)
 
         if route == "oral":
-            y0[GLU_ABS] = dose_mg
+            # Apply bioavailability (F) to enforce first-pass extraction of un-modeled transporters
+            # (e.g., OATP1B1 for statins). This acts as an empirical safeguard ensuring that
+            # clinical bioavailability is preserved even when explicit transporter kinetics are missing.
+            F = self.drug.get("F", 1.0)  # Bioavailability; defaults to 1.0 if not specified
+            y0[GLU_ABS] = dose_mg * F
         elif route == "iv":
             v_art = self.vol["arterial_blood"]
             y0[ART] = dose_mg / v_art / self.drug["Rb"]

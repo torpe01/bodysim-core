@@ -992,12 +992,12 @@ def estimate_clearance(logp, fup, mw, drug_type="neutral", pka=None,
         else:
             activity_factor = 1.0
         
-        # CLint for this enzyme = (Vmax / Km) * probability * fup
-        # NOTE: Empirically helpful despite theoretical concerns
+        # CLint for this enzyme = (Vmax / Km) * probability
+        # NOTE: fup is already applied downstream in pbpk_model.py during tissue distribution
         vmax_enzyme = pred["Vmax"] * activity_factor  # Already in nmol/min/mg
         km_enzyme = pred["Km"]
         
-        cl_int_enzyme = (vmax_enzyme / km_enzyme) * pred["probability"] * fup
+        cl_int_enzyme = (vmax_enzyme / km_enzyme) * pred["probability"]
         cl_int_total += cl_int_enzyme
         
         vmax_hepatic_total += vmax_enzyme * pred["probability"]
