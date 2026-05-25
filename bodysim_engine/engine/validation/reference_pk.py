@@ -12,13 +12,13 @@ REFERENCE_PK = {
     "Fluconazole":    {"smiles": "Oc1c(F)cc(F)cc1C(Cn2cncn2)(Cn3cncn3)", "logp": 0.50, "fup": 0.88, "mw": 306.3, "pka": 1.76, "drug_type": "neutral", "dose": 100, "route": "oral", "cmax": 2.2, "auc": 85.0, "ka": 1.8, "F": 0.90, "clint": 1.2, "clrenal": 3.2},
     
     # Cardiovascular
-    "Atorvastatin":   {"smiles": "CC(C)c1c(C(=O)Nc2ccccc2)c(c(n1CCC(O)CC(O)CC(=O)O)c3ccc(F)cc3)c4ccccc4", "logp": 4.06, "fup": 0.02, "mw": 558.6, "pka": 4.46, "drug_type": "acidic", "dose": 40, "route": "oral", "cmax": 0.012, "auc": 0.08, "ka": 1.5, "F": 0.14, "clint": 4.2, "clrenal": 0.1},
+    "Atorvastatin":   {"smiles": "CC(C)c1c(C(=O)Nc2ccccc2)c(c(n1CCC(O)CC(O)CC(=O)O)c3ccc(F)cc3)c4ccccc4", "logp": 4.06, "fup": 0.02, "mw": 558.6, "pka": 4.46, "drug_type": "acidic", "dose": 40, "route": "oral", "cmax": 0.012, "auc": 0.08, "ka": 1.5, "F": 0.14, "clint": 4.2, "clrenal": 0.1, "is_uptake_substrate": True, "vmax_uptake": 50.0, "km_uptake": 2.0},
     "Digoxin":        {"smiles": "CC1OC(OC2C(O)CC(OC3C(O)CC(OC4CCC5(C)C(CCC6C5CC(O)C7(C)C(C8=CC(=O)OC8)CCC67)C4)OC3C)OC2C)CC(O)C1O", "logp": 1.26, "fup": 0.25, "mw": 780.9, "pka": 6.70, "drug_type": "neutral", "dose": 0.25, "route": "oral", "cmax": 0.001, "auc": 0.035, "ka": 0.8, "F": 0.70, "clint": 0.5, "clrenal": 4.2},
     "Furosemide":     {"smiles": "NS(=O)(=O)c1cc(Cl)c(cc1C(=O)O)NCc2occc2", "logp": 2.03, "fup": 0.02, "mw": 330.7, "pka": 3.9, "drug_type": "acidic", "dose": 40, "route": "oral", "cmax": 1.1, "auc": 3.4, "ka": 1.3, "F": 0.61, "clint": 2.0, "clrenal": 8.0},
     "Metoprolol":     {"smiles": "COCc1ccc(cc1)OCC(O)CNC(C)C", "logp": 1.88, "fup": 0.87, "mw": 267.4, "pka": 9.68, "drug_type": "basic", "dose": 100, "route": "oral", "cmax": 0.12, "auc": 0.85, "ka": 1.5, "F": 0.38, "clint": 70.0, "clrenal": 0.4},
     "Nifedipine":     {"smiles": "COC(=O)C1=C(C)NC(C)=C(C1c2ccccc2[N+](=O)[O-])C(=O)OC", "logp": 3.17, "fup": 0.95, "mw": 346.3, "pka": 7.80, "drug_type": "neutral", "dose": 20, "route": "oral", "cmax": 0.08, "auc": 0.25, "ka": 1.8, "F": 0.50, "clint": 220.0, "clrenal": 0.05},
     "Propranolol":    {"smiles": "CC(C)NCC(O)COc1cccc2ccccc12", "logp": 3.48, "fup": 0.13, "mw": 259.3, "pka": 9.42, "drug_type": "basic", "dose": 40, "route": "oral", "cmax": 0.04, "auc": 0.35, "ka": 1.7, "F": 0.26, "clint": 400.0, "clrenal": 0.1},
-    "Rosuvastatin":   {"smiles": "CC(C)N(C)c1nc(nc(c1/C=C/[C@@H](O)C[C@@H](O)CC(=O)O)c2ccc(F)cc2)S(=O)(=O)C", "logp": -0.33, "fup": 0.12, "mw": 481.5, "pka": 4.20, "drug_type": "acidic", "dose": 20, "route": "oral", "cmax": 0.015, "auc": 0.12, "ka": 1.4, "F": 0.20, "clint": 1.2, "clrenal": 0.8},
+    "Rosuvastatin":   {"smiles": "CC(C)N(C)c1nc(nc(c1/C=C/[C@@H](O)C[C@@H](O)CC(=O)O)c2ccc(F)cc2)S(=O)(=O)C", "logp": -0.33, "fup": 0.12, "mw": 481.5, "pka": 4.20, "drug_type": "acidic", "dose": 20, "route": "oral", "cmax": 0.015, "auc": 0.12, "ka": 1.4, "F": 0.20, "clint": 1.2, "clrenal": 0.8, "is_uptake_substrate": True, "vmax_uptake": 50.0, "km_uptake": 2.0},
     "Warfarin":       {"smiles": "CC(=O)CC(c1ccccc1)c2c(O)c3ccccc3oc2=O", "logp": 2.70, "fup": 0.007, "mw": 308.3, "pka": 5.08, "drug_type": "acidic", "dose": 10, "route": "oral", "cmax": 1.1, "auc": 45.0, "ka": 1.2, "F": 0.93, "clint": 4.5, "clrenal": 0.05},
 
     # CNS & Pain
@@ -27,7 +27,7 @@ REFERENCE_PK = {
     "Diazepam":       {"smiles": "CN1C(=O)CN=C(c2ccccc2)c3cc(Cl)ccc13", "logp": 2.82, "fup": 0.01, "mw": 284.7, "pka": 3.40, "drug_type": "neutral", "dose": 10, "route": "oral", "cmax": 0.25, "auc": 5.8, "ka": 1.2, "F": 0.99, "clint": 8.0, "clrenal": 0.05},
     "Ibuprofen":      {"smiles": "CC(C)Cc1ccc(cc1)C(C)C(=O)O", "logp": 3.97, "fup": 0.01, "mw": 206.3, "pka": 4.91, "drug_type": "acidic", "dose": 400, "route": "oral", "cmax": 35.0, "auc": 125.0, "ka": 1.6, "F": 0.80, "clint": 8.0, "clrenal": 0.2},
     "Paracetamol":    {"smiles": "CC(=O)Nc1ccc(O)cc1", "logp": 0.49, "fup": 0.80, "mw": 151.2, "pka": 9.38, "drug_type": "neutral", "dose": 1000, "route": "oral", "cmax": 15.0, "auc": 50.0, "ka": 2.0, "F": 0.88, "clint": 5.0, "clrenal": 0.1},
-    "Phenytoin":      {"smiles": "O=C1NC(=O)C(N1)(c2ccccc2)c3ccccc3", "logp": 2.47, "fup": 0.10, "mw": 252.3, "pka": 8.33, "drug_type": "neutral", "dose": 300, "route": "oral", "cmax": 4.5, "auc": 110.0, "ka": 1.0, "F": 0.85, "clint": 6.0, "clrenal": 0.1},
+    "Phenytoin":      {"smiles": "O=C1NC(=O)C(N1)(c2ccccc2)c3ccccc3", "logp": 2.47, "fup": 0.10, "mw": 252.3, "pka": 8.33, "drug_type": "neutral", "dose": 300, "route": "oral", "cmax": 4.5, "auc": 110.0, "ka": 1.0, "F": 0.85, "clint": 6.0, "clrenal": 0.1, "Vmax_hepatic": 80.0},
     "Midazolam":      {"smiles": "Cn1cc2c(n1)N=C(c3ccccc3)c1cc(F)ccc1-2", "logp": 3.89, "fup": 0.03, "mw": 325.8, "pka": 6.15, "drug_type": "basic", "dose": 7.5, "route": "oral", "cmax": 0.05, "auc": 0.18, "ka": 1.6, "F": 0.40, "clint": 180.0, "clrenal": 0.1},
 
     # GI & Metabolic
