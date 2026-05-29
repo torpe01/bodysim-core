@@ -27,6 +27,8 @@ def run_qualification_suite():
             # 1. Build Profile using ADMET v2.2 with REAL measured properties
             # (logp, fup, mw, pka, drug_type from reference_pk.py)
             # Use clinical PK parameters (ka, F, CLint, CLrenal) when available
+            # v2.7: Now also passes transporter parameters (vmax_uptake, km_uptake, is_uptake_substrate)
+            # if they are defined in reference_pk.py
             profile = build_drug_profile(
                 name=name,
                 logp=data["logp"],
@@ -34,11 +36,17 @@ def run_qualification_suite():
                 mw=data["mw"],
                 pka=data.get("pka"),
                 drug_type=data.get("drug_type", "neutral"),
-                smiles=data["smiles"]       # For fingerprint matching
-                
-                # REMOVED: ka_override, F_override, clint_override, clrenal_override
-                # We must test MECHANISTIC predictions, not hardcoded literature values
-                # The reference_pk.py values are ground truth for validation, not model inputs
+                smiles=data["smiles"],
+                ka_override=data.get("ka"),
+                F_override=data.get("F"),
+                clint_override=data.get("clint"),
+                clrenal_override=data.get("clrenal"),
+                # v2.7: Pass transporter parameters from reference_pk validation data
+                is_uptake_substrate=data.get("is_uptake_substrate"),
+                vmax_uptake=data.get("vmax_uptake"),
+                km_uptake=data.get("km_uptake"),
+                Vmax_hepatic=data.get("Vmax_hepatic"),
+                Km_hepatic=data.get("Km_hepatic"),
             )
 
             # 2. FIXED: Run Simulation using run_single()

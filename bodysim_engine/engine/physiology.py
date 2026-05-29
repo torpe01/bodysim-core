@@ -19,6 +19,11 @@ REFERENCE_HUMAN = {
     "cyp3a4_activity": 1.0,
     "cyp2d6_activity": 1.0,
     "disease_state": "healthy",
+    # ── v2.7 additions ────────────────────────────────────────────────────────
+    # Urine pH governs passive tubular reabsorption for ionizable drugs.
+    # Physiological range: 4.5 (acid load) → 8.5 (alkaline load); default 6.0.
+    # Sources: Remer & Manz, J Am Diet Assoc 1995; Toto, Am J Kidney Dis 1992.
+    "urine_ph": 6.0,
 }
 
 # Organ volumes (L) — ICRP-89 Table 2.8
@@ -143,7 +148,19 @@ def lung_kp(logp: float, pka: float = None, drug_type: str = "neutral") -> float
 
 
 def scale_physiology(weight_kg=70.0, age_yr=35.0, sex="male",
-                     height_cm=170.0, egfr=None, disease_state="healthy"):
+                     height_cm=170.0, egfr=None, disease_state="healthy",
+                     urine_ph=6.0):
+    """
+    Scale physiological parameters to a specific subject.
+
+    Parameters
+    ----------
+    urine_ph : float, optional
+        Urinary pH for tubular reabsorption calculations (v2.7).
+        Physiological range 4.5–8.5; default 6.0 (typical fasted adult).
+        Acidic urine (pH < 6): promotes reabsorption of bases, excretion of acids.
+        Alkaline urine (pH > 7): promotes reabsorption of acids, excretion of bases.
+    """
     bw_ratio   = weight_kg / 70.0
     scale_v    = bw_ratio ** 0.75
     scale_q    = bw_ratio ** 0.75
@@ -164,6 +181,12 @@ def scale_physiology(weight_kg=70.0, age_yr=35.0, sex="male",
                * disease_modifiers["cyp3a4_factor"])
     cyp2d6 = _cyp2d6_activity(age_yr, sex)
 
+    # v2.7: clamp urine_ph to physiological range; disease modifiers can override
+    urine_ph_effective = float(np.clip(urine_ph, 4.5, 8.5))
+    if disease_state == "severe_ckd":
+        # Metabolic acidosis in advanced CKD acidifies urine slightly
+        urine_ph_effective = min(urine_ph_effective, 5.5)
+
     params = {
         "weight_kg":       weight_kg,
         "age_yr":          age_yr,
@@ -172,6 +195,8 @@ def scale_physiology(weight_kg=70.0, age_yr=35.0, sex="male",
         "cyp3a4_activity": cyp3a4,
         "cyp2d6_activity": cyp2d6,
         "disease_state":   disease_state,
+        # ── v2.7 ──────────────────────────────────────────────────────────────
+        "urine_ph":        urine_ph_effective,
     }
     return volumes, flows, params
 

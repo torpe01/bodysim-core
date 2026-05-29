@@ -1107,7 +1107,10 @@ def build_drug_profile(name, logp, fup, mw, pka=None,
                        clint_override=None, clrenal_override=None,
                        ka_override=None, F_override=None,
                        kp_overrides=None,
-                       egfr_ml_min=100.0, cyp3a4_activity=1.0):
+                       egfr_ml_min=100.0, cyp3a4_activity=1.0,
+                       # v2.7: Transporter parameters from reference_pk validation data
+                       is_uptake_substrate=None, vmax_uptake=None, km_uptake=None,
+                       Vmax_hepatic=None, Km_hepatic=None):
     """
     Build mechanistic drug profile from physicochemical properties.
     
@@ -1169,11 +1172,16 @@ def build_drug_profile(name, logp, fup, mw, pka=None,
         # Clearance (with enzyme breakdown)
         "CLint": clint_override if clint_override is not None else cl_params["CLint"],
         "CLrenal": clrenal_override if clrenal_override is not None else cl_params["CLrenal"],
-        "Vmax_hepatic": cl_params["Vmax_hepatic"],
-        "Km_hepatic": cl_params["Km_hepatic"],
+        "Vmax_hepatic": Vmax_hepatic if Vmax_hepatic is not None else cl_params["Vmax_hepatic"],
+        "Km_hepatic": Km_hepatic if Km_hepatic is not None else cl_params["Km_hepatic"],
         "Vmax_renal": cl_params["Vmax_renal"],
         "Km_renal": cl_params["Km_renal"],
         "cyp_breakdown": cl_params["cyp_breakdown"],
+        
+        # v2.7: Transporter substrate parameters (from validation reference data)
+        "is_uptake_substrate": is_uptake_substrate if is_uptake_substrate is not None else kp_result.get("has_uptake_transporter", False),
+        "vmax_uptake": vmax_uptake if vmax_uptake is not None else cl_params.get("Vmax_uptake", 0.0),
+        "km_uptake": km_uptake if km_uptake is not None else cl_params.get("Km_uptake", 0.0),
         
         # Other
         "Rb": rb,

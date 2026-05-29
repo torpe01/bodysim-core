@@ -3,6 +3,30 @@ pbpk_model.py — Multi-compartment PBPK ODE model for BodySim.
 v2.6 — FLUX BALANCE OPTIMIZATION: Fixed high-extraction drug trapping in liver blood.
 
 ─────────────────────────────────────────────────────────────────────────────
+CHANGES FROM v2.6 → v2.7  (Renal Accuracy Sprint)
+─────────────────────────────────────────────────────────────────────────────
+
+✅ PASSIVE TUBULAR REABSORPTION (Gap 3.1):
+  - Implements CL_reab = Q_tubular_water × f_neutral_urine × k_perm
+  - Q_tubular_water = 1% of GFR (99% of filtered water is reabsorbed)
+  - f_neutral_urine from Henderson-Hasselbalch at subject-specific urine pH
+  - k_perm from linear logP interpolation [-1 → 1]: 0.0 (hydrophilic) to 1.0
+  - Reabsorption raises kidney compartment concentration → returns drug to venous
+  - Fixes 2–10× CLrenal overestimate for basic drugs (metoprolol, propranolol, etc.)
+
+✅ RENAL EXTRACTION RATIO CAP (Gap 3.3):
+  - Total active secretion clearance is now flow-limited by renal plasma flow
+  - Well-stirred kidney model: ER = (fup × CLint_sec/Rb) / (Q_kp + fup × CLint_sec/Rb)
+  - CL_sec_observed = Q_kp × ER_kidney  (never exceeds Q_kp)
+  - Caps are applied before MM saturation in the ODE, preventing impossible predictions
+
+✅ NCA TERMINAL PARAMETERS (Gap 5.1):
+  - solve() now returns t_half_h, lambda_z_per_h, cl_total_lh, vss_l, mrt_h, auc0inf
+  - λz from log-linear regression of terminal 20% of plasma time-course (≥3 points)
+  - Vss: CL × MRT (IV); CL × (MRT − 1/ka) for oral, subtracting mean absorption time
+  - AUC0-∞ extrapolated as AUC0-t + C_last / λz
+
+─────────────────────────────────────────────────────────────────────────────
 CHANGES FROM v2.5 → v2.6
 ─────────────────────────────────────────────────────────────────────────────
 
@@ -176,6 +200,12 @@ class PBPKModel:
             # --- LIVER PERMEABILITY-LIMITED 2-COMPARTMENT (v2.3+) ---
             # Dynamic CL_pd based on logP (v2.4 fix: solves Propranolol bottleneck)
             "liver_CL_pd": None,  # Will be calculated from drug logP in __init__
+
+            # --- v2.7: RENAL ACCURACY PARAMETERS ---
+            # urine_ph: urinary pH for tubular reabsorption (Henderson-Hasselbalch).
+            #   Range 4.5–8.5; 6.0 is the typical fasted adult default.
+            #   Pass subject-specific value from scale_physiology() output.
+            "urine_ph": 6.0,
         }
         
         # Merge user params with defaults
@@ -356,6 +386,79 @@ class PBPKModel:
             }
             cl_sec_linear_total = cl_sec_target
 
+        # ── v2.7: RENAL EXTRACTION RATIO CAP (Gap 3.3) ──────────────────────
+        # Active secretion is limited by renal plasma flow (well-stirred model).
+        # Without this cap, a drug with a huge predicted CLint_sec can yield
+        # CL_renal > Q_kidney, which violates mass balance.
+        #
+        # Well-stirred kidney: ER_kidney = (fup × CLint_sec / Rb) / (Q_kp + fup × CLint_sec / Rb)
+        #                      CL_sec_obs = Q_kidney_plasma × ER_kidney
+        #
+        # Reference: Rowland & Tozer, Clinical Pharmacokinetics 5th ed., Ch. 5.
+        Rb = self.drug.get("Rb", 1.0)
+        Q_kidney_blood  = self.flow["kidney"]                 # L/h, whole blood
+        Q_kidney_plasma = Q_kidney_blood / max(Rb, 0.01)     # L/h, plasma flow
+
+        if cl_sec_linear_total > 1e-9:
+            _er_sec = (
+                (fup * cl_sec_linear_total / Rb)
+                / (Q_kidney_plasma + fup * cl_sec_linear_total / Rb)
+            )
+            cl_sec_plasma_cap_lh = float(Q_kidney_plasma * _er_sec)
+        else:
+            cl_sec_plasma_cap_lh = 0.0   # No secretion: cap is irrelevant
+
+        # ── v2.7: PASSIVE TUBULAR REABSORPTION CL (Gap 3.1) ─────────────────
+        # Reabsorption occurs as tubular fluid is concentrated: 99% of filtered
+        # water is reclaimed, leaving only ~1% as urine. Only the un-ionized
+        # (neutral) fraction of a drug crosses the tubular lipid membrane.
+        #
+        # CL_reabsorption = Q_tubular_water × f_neutral_urine × k_perm
+        #
+        # Q_tubular_water = 0.01 × GFR_lh   (1% of filtered water becomes urine)
+        # f_neutral_urine  = fraction un-ionized at urine pH (Henderson-Hasselbalch)
+        # k_perm           = membrane permeability factor from logP
+        #                    0.0 at logP ≤ -1 (polar, membrane-impermeant)
+        #                    1.0 at logP ≥  1 (lipophilic, freely membrane-permeant)
+        #                    linear interpolation in between
+        #
+        # References:
+        #   Gibaldi et al., J Pharm Sci 1969 — pH-partition reabsorption
+        #   Reigner & Blesch, Eur J Clin Pharmacol 2002 — tubular water flow
+        pka      = self.drug.get("pka", None)
+        drug_type = self.drug.get("drug_type", "neutral")
+        logp     = self.drug.get("logp", 0.0)
+        urine_ph = float(self.params.get("urine_ph", 6.0))
+
+        Q_tubular_water_lh = 0.01 * gfr_lh   # ~1.0–1.5 mL/min as urine flow
+
+        # f_neutral_urine: fraction of drug in un-ionized form at urinary pH.
+        # Only neutral molecules permeate tubular epithelium (pH-partition hypothesis).
+        if pka is None or drug_type == "neutral":
+            f_neutral_urine = 1.0
+        elif drug_type == "acidic":
+            # HA ⇌ H⁺ + A⁻: neutral form HA dominates at pH << pKa
+            # f_neutral = 1 / (1 + 10^(pH - pKa))
+            f_neutral_urine = float(1.0 / (1.0 + 10.0 ** (urine_ph - pka)))
+        elif drug_type == "basic":
+            # BH⁺ ⇌ B + H⁺: neutral form B dominates at pH >> pKa
+            # f_neutral = 1 / (1 + 10^(pKa - pH))
+            f_neutral_urine = float(1.0 / (1.0 + 10.0 ** (pka - urine_ph)))
+        elif drug_type == "zwitterion":
+            # Zwitterions have both ionization states; approximate as low permeability
+            f_neutral_urine = 0.15
+        else:
+            f_neutral_urine = 1.0
+        f_neutral_urine = float(np.clip(f_neutral_urine, 0.0, 1.0))
+
+        # k_perm: lipid membrane permeability of the neutral form.
+        # Linear interpolation: logP=-1 → k_perm=0.0, logP=+1 → k_perm=1.0
+        # Drugs with logP < -1 are too hydrophilic to permeate tubular cells.
+        # Drugs with logP > +1 permeate freely.
+        k_perm = float(np.clip((logp - (-1.0)) / (1.0 - (-1.0)), 0.0, 1.0))
+
+        cl_reabsorption_lh = float(Q_tubular_water_lh * f_neutral_urine * k_perm)
+
         # ── GUT EFFLUX (P-gp / MRP2) ──
         # Now modeled as SEPARATE ODE, not just ka reduction
         mrp2_prob = 0.0
@@ -395,6 +498,12 @@ class PBPKModel:
             "renal_secretion": renal_secretion,
             "cl_filt": cl_filt,
             "cl_sec_total": cl_sec_linear_total,
+            # v2.7 renal additions
+            "cl_sec_plasma_cap_lh": cl_sec_plasma_cap_lh,
+            "cl_reabsorption_lh":   cl_reabsorption_lh,
+            "urine_ph":             urine_ph,
+            "f_neutral_urine":      f_neutral_urine,
+            "k_perm":               k_perm,
             "km_hep_mgl": km_hep_mgl,
             "use_mm_hepatic": use_mm_hep,
             
@@ -733,15 +842,63 @@ class PBPKModel:
             - metabolic_rate  # Metabolic sink: CYP-mediated clearance (saturable or linear)
         ) / v_liv_tiss
 
-        # ── [KID] Kidney ───────────────────────────────────────────────────
+        # ── [KID] Kidney  (v2.7 — reabsorption + ER cap) ──────────────────
+        #
+        # Mass balance for the lumped kidney compartment:
+        #
+        #   dC_kid/dt = (perfusion inflow)
+        #             - (active net tubular secretion)    ← drug lost to urine
+        #             + (passive tubular reabsorption)    ← drug returned from lumen
+        #
+        # Perfusion term: standard Q×(C_in − C_out/Kp) inflow/outflow.
+        # Active secretion: sum of MM-kinetic transporter clearances, capped at
+        #   the well-stirred renal extraction ratio limit (never > renal plasma flow).
+        # Reabsorption: un-ionized drug passively crosses tubular epithelium back
+        #   into kidney interstitium → eventually leaves via venous outflow.
+        #   Rate = CL_reab × C_kid_free / V_kidney.
+        #
+        # References:
+        #   Rowland & Tozer, Clinical Pharmacokinetics 5th ed.
+        #   Gibaldi et al., J Pharm Sci 1969; Reigner & Blesch 2002.
+
         passive_kid = (Q_kid / v["kidney"]) * (C_art_blood - (C_kid / kp["kidney"]) * Rb)
 
-        active_sec_kid = 0.0
+        # ── Step 1: Gross active secretion (MM-kinetic, sum over transporters) ──
+        # _active_cl returns a saturation-adjusted intrinsic clearance (L/h).
+        # Multiply by C_kid_free / V_kidney to get a volumetric rate (mg / (L·h)).
+        active_sec_gross_cl = 0.0   # L/h — total secretion clearance before cap
         for name, trans in tp["renal_secretion"].items():
-            cl_sec = self._active_cl(trans, C_kid_free)
-            active_sec_kid += cl_sec * C_kid_free / v["kidney"]
+            active_sec_gross_cl += self._active_cl(trans, C_kid_free)
 
-        dydt[KID] = passive_kid - active_sec_kid
+        # ── Step 2: Apply renal extraction ratio cap (v2.7, Gap 3.3) ────────
+        # Cap total secretion clearance to the well-stirred limit derived in
+        # _build_transporter_params.  At high CLint the kidney becomes
+        # blood-flow-limited, exactly as the liver does for high-EH drugs.
+        cl_sec_cap = tp["cl_sec_plasma_cap_lh"]
+        if active_sec_gross_cl > cl_sec_cap:
+            # Proportionally scale each transporter's contribution so the ODE
+            # rate exactly equals the flow-limited cap at this concentration.
+            _cap_ratio = cl_sec_cap / active_sec_gross_cl if active_sec_gross_cl > 1e-12 else 1.0
+            active_sec_gross_cl = cl_sec_cap
+        else:
+            _cap_ratio = 1.0   # No capping needed; ratio unused
+
+        active_sec_rate = (active_sec_gross_cl * C_kid_free) / v["kidney"]  # mg/(L·h)
+
+        # ── Step 3: Passive tubular reabsorption (v2.7, Gap 3.1) ─────────────
+        # CL_reab was pre-computed in _build_transporter_params from:
+        #   Q_tubular_water × f_neutral_urine × k_perm
+        # Applying it to C_kid_free gives the rate at which drug is returned
+        # from the tubular lumen to kidney tissue (and onward to venous blood).
+        cl_reab = tp["cl_reabsorption_lh"]
+        reabs_rate = (cl_reab * C_kid_free) / v["kidney"]   # mg/(L·h)
+
+        # ── ODE assembly ──────────────────────────────────────────────────────
+        # Net kidney dC/dt: inflow (perfusion) - loss (net secretion) + recovery (reabs).
+        # active_sec_rate ≥ 0 always; reabs_rate ≥ 0 always.
+        # The reabsorbed drug stays in the kidney compartment and eventually returns
+        # to systemic venous blood via the perfusion outflow term in venous_inflow.
+        dydt[KID] = passive_kid - active_sec_rate + reabs_rate
 
         # ── Standard passive compartments ──────────────────────────────────
         dydt[BRA] = (Q_bra / v["brain"]) * (C_art_blood - (C_bra / kp["brain"]) * Rb)
@@ -900,17 +1057,40 @@ class PBPKModel:
             "pgp_efflux_prob": round(tp["pgp_efflux_prob"], 3),
             "saturable_metabolism": tp["use_mm_hepatic"],
             "venous_delay_used": self.params["venous_delay_enabled"],
-            
             # Model parameters (for transparency)
             "transporter_scale_factor": self.params["transporter_scale_factor"],
             "default_renal_km_um": self.params["default_renal_km_um"],
             "pgp_km_um": self.params["pgp_km_um"],
-            "liver_cl_pd": self.params.get("liver_CL_pd", 10.0),  # Passive diffusion in liver
+            "liver_cl_pd": self.params.get("liver_CL_pd", 10.0),
             "liver_model": "permeability-limited 2-compartment (v2.3+)",
+            # v2.7 renal additions
+            "cl_reab_lh":          round(tp.get("cl_reabsorption_lh", 0.0), 4),
+            "cl_sec_plasma_cap_lh": round(tp.get("cl_sec_plasma_cap_lh", 0.0), 4),
+            "urine_ph":             tp.get("urine_ph", self.params.get("urine_ph", 6.0)),
+            "f_neutral_urine":      round(tp.get("f_neutral_urine", 1.0), 4),
+            "k_perm_reab":          round(tp.get("k_perm", 0.0), 4),
         }
-        
+
         # P-gp efflux mass balance
-        total_effluxed = float(Y[GLU_EFF][-1])  # Final amount in efflux depot
+        total_effluxed = float(Y[GLU_EFF][-1])
+
+        # ── v2.7: Non-Compartmental Analysis (NCA) — terminal PK parameters ─
+        #
+        # Calculates λz, t½, CL_total, Vss, MRT, and AUC0-∞ from the simulated
+        # plasma profile.  Uses log-linear regression on the terminal 20% of
+        # timepoints (minimum 3 positive-concentration points required).
+        #
+        # Vss estimation:
+        #   IV  route: Vss = CL × MRT            (exact, Benet & Galeazzi 1979)
+        #   Oral route: Vss = CL × (MRT − 1/ka)  (subtract mean absorption time)
+        #
+        # AUC0-∞ extrapolation:
+        #   AUC0-∞ = AUC0-t + C_last / λz
+        #
+        # References:
+        #   Gibaldi & Perrier, Pharmacokinetics 2nd ed. (1982) — NCA methods
+        #   Benet & Galeazzi, J Pharm Sci 1979 — Vss = CL × MRT
+        nca = self._calculate_nca(t, plasma, dose_mg, route)
 
         return {
             "t": t,
@@ -927,4 +1107,131 @@ class PBPKModel:
             "pgp_total_effluxed_mg": total_effluxed,
             "gut_lumen_absorption": Y[GLU_ABS],
             "gut_lumen_efflux": Y[GLU_EFF],
+            # ── v2.7: NCA terminal parameters ────────────────────────────────
+            "t_half_h":         nca["t_half_h"],
+            "lambda_z_per_h":   nca["lambda_z_per_h"],
+            "cl_total_lh":      nca["cl_total_lh"],
+            "vss_l":            nca["vss_l"],
+            "mrt_h":            nca["mrt_h"],
+            "auc0inf_mg_l_h":   nca["auc0inf_mg_l_h"],
+        }
+
+    # ── v2.7: NCA helper ───────────────────────────────────────────────────
+    def _calculate_nca(self, t: np.ndarray, plasma: np.ndarray,
+                       dose_mg: float, route: str) -> dict:
+        """
+        Non-compartmental analysis from a simulated plasma concentration–time profile.
+
+        Parameters
+        ----------
+        t        : 1-D array   time points (h)
+        plasma   : 1-D array   arterial plasma concentrations (mg/L)
+        dose_mg  : float       administered dose (mg)
+        route    : str         'oral' or 'iv' (affects Vss calculation)
+
+        Returns
+        -------
+        dict with keys:
+            t_half_h        terminal half-life (h); None if λz cannot be fitted
+            lambda_z_per_h  terminal elimination rate constant (h⁻¹)
+            cl_total_lh     total body clearance (L/h) = dose / AUC0-∞
+            vss_l           steady-state volume of distribution (L)
+            mrt_h           mean residence time (h)
+            auc0inf_mg_l_h  AUC extrapolated to infinity (mg·h/L)
+        """
+        from scipy.integrate import trapezoid as _trapz
+
+        _SENTINEL = None   # Returned for any parameter that cannot be computed
+
+        # ── AUC0-t (linear-log trapezoidal already computed; recalculate here) ──
+        auc_0_t = float(_trapz(plasma, t))
+        if auc_0_t < 1e-15:
+            return {
+                "t_half_h": _SENTINEL, "lambda_z_per_h": _SENTINEL,
+                "cl_total_lh": _SENTINEL, "vss_l": _SENTINEL,
+                "mrt_h": _SENTINEL, "auc0inf_mg_l_h": 0.0,
+            }
+
+        # ── Terminal phase: log-linear regression ─────────────────────────────
+        # Use the last 20% of timepoints as the candidate terminal window.
+        # Require ≥ 3 points above a floor of 0.1% of Cmax to ensure the fit is
+        # not dominated by numerical noise.
+        n           = len(t)
+        c_floor     = 1e-3 * float(np.max(plasma))
+        idx_start   = max(int(0.80 * n), n - 50)   # ≥ 80% of total time
+
+        t_win  = t[idx_start:]
+        c_win  = plasma[idx_start:]
+        mask   = c_win > c_floor
+
+        lambda_z = _SENTINEL
+        t_half   = _SENTINEL
+
+        if int(np.sum(mask)) >= 3:
+            try:
+                log_c  = np.log(c_win[mask])
+                t_fit  = t_win[mask]
+                slope, _intercept = np.polyfit(t_fit, log_c, 1)
+
+                # Require a genuine elimination slope (negative = falling curve)
+                if slope < -1e-6:
+                    lambda_z = float(-slope)
+                    t_half   = float(np.log(2.0) / lambda_z)
+            except (np.linalg.LinAlgError, ValueError):
+                pass   # Cannot regress; leave as None
+
+        # ── AUC0-∞ extrapolation ──────────────────────────────────────────────
+        c_last = float(c_win[mask][-1]) if (mask.any() and lambda_z is not None) \
+                 else float(plasma[-1])
+
+        if lambda_z is not None:
+            auc_0_inf = float(auc_0_t + c_last / lambda_z)
+        else:
+            auc_0_inf = float(auc_0_t)   # Cannot extrapolate; underestimate flagged
+
+        # ── Total body clearance ──────────────────────────────────────────────
+        cl_total = float(dose_mg / auc_0_inf) if auc_0_inf > 1e-15 else _SENTINEL
+
+        # ── AUMC0-∞ and MRT ───────────────────────────────────────────────────
+        # AUMC = ∫ t·C(t) dt
+        # Terminal extrapolation of AUMC0-t:
+        #   AUMC_extra = C_last/λz² + t_last·C_last/λz
+        #   (from integrating t·C_last·exp(−λz·t) from t_last to ∞)
+        aumc_0_t = float(_trapz(t * plasma, t))
+        t_last   = float(t[-1])
+
+        if lambda_z is not None:
+            aumc_extra = (c_last / lambda_z ** 2) + (t_last * c_last / lambda_z)
+            aumc_0_inf = aumc_0_t + aumc_extra
+        else:
+            aumc_0_inf = aumc_0_t   # Underestimate; λz unavailable
+
+        mrt = float(aumc_0_inf / auc_0_inf) if auc_0_inf > 1e-15 else _SENTINEL
+
+        # ── Vss ───────────────────────────────────────────────────────────────
+        # IV  : Vss = CL × MRT                           (exact)
+        # Oral: Vss = CL × (MRT − MAT)   where MAT = 1/ka  (subtract mean absorption time)
+        #   The oral MRT includes the absorption phase; subtracting MAT converts it
+        #   to the equivalent IV MRT for Vss estimation.
+        #   Reference: Riegelman & Collier, J Pharmacokinet Biopharm 1980.
+        vss = _SENTINEL
+        if cl_total is not None and mrt is not None:
+            if route == "iv":
+                vss = float(cl_total * mrt)
+            else:
+                ka  = float(self.drug.get("ka", 1.5))
+                mat = 1.0 / ka if ka > 1e-6 else 0.0      # Mean absorption time (h)
+                mrt_iv_equiv = mrt - mat
+                if mrt_iv_equiv > 0.0:
+                    vss = float(cl_total * mrt_iv_equiv)
+                # If mrt_iv_equiv ≤ 0 the absorption is slower than elimination
+                # and Vss cannot be reliably estimated from oral data alone.
+
+        return {
+            "t_half_h":        round(t_half,   3) if t_half   is not None else _SENTINEL,
+            "lambda_z_per_h":  round(lambda_z, 6) if lambda_z is not None else _SENTINEL,
+            "cl_total_lh":     round(cl_total, 4) if cl_total is not None else _SENTINEL,
+            "vss_l":           round(vss,      3) if vss      is not None else _SENTINEL,
+            "mrt_h":           round(mrt,      3) if mrt      is not None else _SENTINEL,
+            "auc0inf_mg_l_h":  round(auc_0_inf, 4),
         }
