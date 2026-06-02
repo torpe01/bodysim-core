@@ -5,6 +5,9 @@ Sources:
   [ICRP89]  ICRP Publication 89 (2002) — organ volumes and blood flows
   [RODGERS] Rodgers & Rowland, J Pharm Sci 2006 — tissue composition
   [BROWN97] Brown et al., Toxicol Sci 1997 — allometric scaling
+  [YU1996]  Yu et al., Pharm Res 1996 — ACAT GI transit / surface area
+  [DRESSMAN] Dressman & Reppas, Eur J Pharm Biopharm 2000 — intestinal pH
+  [SIMCYP]  Jamei et al., Expert Opin Drug Metab Toxicol 2009 — ACAT parameterisation
 """
 
 import numpy as np
@@ -19,7 +22,7 @@ REFERENCE_HUMAN = {
     "cyp3a4_activity": 1.0,
     "cyp2d6_activity": 1.0,
     "disease_state": "healthy",
-    # ── v2.7 additions ────────────────────────────────────────────────────────
+    # ── v2.7 ─────────────────────────────────────────────────────────────────
     # Urine pH governs passive tubular reabsorption for ionizable drugs.
     # Physiological range: 4.5 (acid load) → 8.5 (alkaline load); default 6.0.
     # Sources: Remer & Manz, J Am Diet Assoc 1995; Toto, Am J Kidney Dis 1992.
@@ -76,6 +79,81 @@ TISSUE_COMPOSITION = {
 }
 
 ALLOMETRIC_EXPONENTS = {"volume": 0.75, "flow": 0.75, "clearance": 0.75}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# v2.8 — ACAT (Advanced Compartmental Absorption and Transit) GI Parameters
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# The GI tract is divided into 7 luminal segments.  Each segment is
+# characterised by:
+#
+#   transit_time_h      : mean residence time of luminal contents in that
+#                         segment (h).  Transit rate constant k_t = 1/transit_time_h.
+#   ph                  : local luminal pH used in the Henderson–Hasselbalch
+#                         equation to compute the fraction unionized (f_u,i).
+#   surface_area_factor : dimensionless scaling factor (relative to a reference
+#                         jejunum surface area) that accounts for villi and
+#                         microvilli amplification along the GI tract.
+#
+# Ordering: index 0 = Stomach (i=1 in the ODE), …, index 6 = Cecum/Colon (i=7).
+#
+# Primary sources:
+#   [YU1996]    Yu LX et al., Pharm Res 1996;13:1673 — GI transit times
+#   [DRESSMAN] Dressman JB, Reppas C, Eur J Pharm Biopharm 2000;49:241
+#              — luminal pH values
+#   [SIMCYP]   Jamei M et al., Expert Opin Drug Metab Toxicol 2009;5:211
+#              — surface-area scaling factors
+# ═══════════════════════════════════════════════════════════════════════════
+
+GI_TRACT_ACAT = {
+    # Segment name  : (transit_time_h, luminal_pH, surface_area_factor)
+    # Keys must remain stable — the ODE uses integer indexing over the ordered
+    # list, so do NOT reorder or rename entries between v2.8 releases.
+    "stomach": {
+        "transit_time_h":      0.25,
+        "ph":                  1.5,
+        "surface_area_factor": 0.01,
+    },
+    "duodenum": {
+        "transit_time_h":      0.25,
+        "ph":                  6.0,
+        "surface_area_factor": 0.10,
+    },
+    "jejunum_1": {
+        "transit_time_h":      0.50,
+        "ph":                  6.2,
+        "surface_area_factor": 1.00,
+    },
+    "jejunum_2": {
+        "transit_time_h":      0.75,
+        "ph":                  6.6,
+        "surface_area_factor": 0.80,
+    },
+    "ileum_1": {
+        "transit_time_h":      1.00,
+        "ph":                  7.4,
+        "surface_area_factor": 0.60,
+    },
+    "ileum_2": {
+        "transit_time_h":      1.00,
+        "ph":                  7.8,
+        "surface_area_factor": 0.40,
+    },
+    "cecum_colon": {
+        "transit_time_h":     18.00,
+        "ph":                  6.5,
+        "surface_area_factor": 0.10,
+    },
+}
+
+# Convenience: ordered tuple of segment names (preserves index ↔ name mapping)
+ACAT_SEGMENT_NAMES = tuple(GI_TRACT_ACAT.keys())   # length == 7
+
+# Convenience: flat arrays for use in ODE hot-path (avoid dict lookup per step)
+ACAT_TRANSIT_TIMES = tuple(GI_TRACT_ACAT[s]["transit_time_h"]      for s in ACAT_SEGMENT_NAMES)
+ACAT_PH            = tuple(GI_TRACT_ACAT[s]["ph"]                   for s in ACAT_SEGMENT_NAMES)
+ACAT_SA_FACTORS    = tuple(GI_TRACT_ACAT[s]["surface_area_factor"]  for s in ACAT_SEGMENT_NAMES)
+N_ACAT_SEGMENTS    = len(ACAT_SEGMENT_NAMES)   # == 7
 
 
 def gfr_from_age(age_yr, sex="male"):
@@ -160,6 +238,12 @@ def scale_physiology(weight_kg=70.0, age_yr=35.0, sex="male",
         Physiological range 4.5–8.5; default 6.0 (typical fasted adult).
         Acidic urine (pH < 6): promotes reabsorption of bases, excretion of acids.
         Alkaline urine (pH > 7): promotes reabsorption of acids, excretion of bases.
+
+    Returns
+    -------
+    volumes : dict  organ volumes (L) scaled to subject
+    flows   : dict  organ blood flows (L/h) scaled to subject
+    params  : dict  subject physiological parameters (egfr, CYP activities, urine_ph)
     """
     bw_ratio   = weight_kg / 70.0
     scale_v    = bw_ratio ** 0.75
@@ -195,7 +279,7 @@ def scale_physiology(weight_kg=70.0, age_yr=35.0, sex="male",
         "cyp3a4_activity": cyp3a4,
         "cyp2d6_activity": cyp2d6,
         "disease_state":   disease_state,
-        # ── v2.7 ──────────────────────────────────────────────────────────────
+        # ── v2.7 ─────────────────────────────────────────────────────────────
         "urine_ph":        urine_ph_effective,
     }
     return volumes, flows, params
