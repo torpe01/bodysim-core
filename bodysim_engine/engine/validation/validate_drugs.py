@@ -10,9 +10,36 @@ from engine.simulator import Simulator
 from engine.admet import build_drug_profile
 from engine.validation.reference_pk import REFERENCE_PK
 
+# ── v5.1 Data Bridge Fix ───────────────────────────────────────────────────
+# Previously, advanced module keys present in reference_pk.py were never
+# forwarded to build_drug_profile(), silently disabling Modules P1/P2/P5/P6/P7
+# and the EHC circuit for 11 of the 23 validation drugs.
+#
+# This list contains every optional advanced key that build_drug_profile()
+# accepts via **kwargs.  Keys absent from a drug's reference_pk entry are
+# simply skipped — no KeyError, no change to existing behaviour for that drug.
+_ADVANCED_KEYS = [
+    "gut_transporter",      # Module P5 — active SLC influx (PEPT1 / OCT1 / PMAT)
+    "phaseII_kinetics",     # Module P2 — SULT/UGT saturable conjugation
+    "fu_gut",               # Module P1 — gut-wall CYP3A4 unbound fraction
+    "CLint_gut_cyp3a4",     # Module P1 — gut-wall CYP3A4 intrinsic clearance
+    "tmdd_params",          # Module P7 — TMDD quasi-steady state
+    "kp_scalar",            # Empirical Vd correction scalar
+    "cl_bile_lh",           # Gap 2 EHC — biliary secretion clearance [L/h]
+    "f_reabs_bile",         # Gap 2 EHC — fraction reabsorbed from bile
+    "p_eff",                # Measured intestinal permeability [cm/s] override
+    "is_uptake_substrate",  # Module P6 — OATP1B1/1B3 hepatic uptake flag
+    "vmax_uptake",          # Module P6 — OATP Vmax [mg/h]
+    "km_uptake",            # Module P6 — OATP Km [mg/L]
+    "Vmax_hepatic",         # Explicit Michaelis-Menten hepatic Vmax [mg/h]
+    "Km_hepatic",           # Explicit Michaelis-Menten hepatic Km [mg/L]
+]
+# ──────────────────────────────────────────────────────────────────────────
+
+
 def run_qualification_suite():
     print(f"\n{'='*60}")
-    print(f" BODYSIM QUALIFICATION SUITE — v2.2 Mechanistic Model")
+    print(f" BODYSIM QUALIFICATION SUITE — v5.1 Data Bridge Fix")
     print(f" Running validation on {len(REFERENCE_PK)} drugs...")
     print(f"{'='*60}\n")
 
@@ -22,13 +49,19 @@ def run_qualification_suite():
 
     for name, data in REFERENCE_PK.items():
         print(f" Validating: {name:<15} ", end="", flush=True)
-        
+
         try:
-            # 1. Build Profile using ADMET v2.2 with REAL measured properties
+            # ── v5.1: collect every advanced key present for this drug ──
+            # Keys not in this drug's entry are omitted entirely — graceful
+            # degradation means the engine falls back to linear physics for
+            # any mechanism whose parameters are absent.
+            advanced_kwargs = {k: data[k] for k in _ADVANCED_KEYS if k in data}
+
+            # 1. Build Profile using ADMET with REAL measured properties
             # (logp, fup, mw, pka, drug_type from reference_pk.py)
-            # Use clinical PK parameters (ka, F, CLint, CLrenal) when available
-            # v2.7: Now also passes transporter parameters (vmax_uptake, km_uptake, is_uptake_substrate)
-            # if they are defined in reference_pk.py
+            # Use clinical PK parameters (ka, F, CLint, CLrenal) when available.
+            # v2.7: explicit transporter params passed by name (unchanged).
+            # v5.1: all remaining advanced module params forwarded via **advanced_kwargs.
             profile = build_drug_profile(
                 name=name,
                 logp=data["logp"],
@@ -41,15 +74,17 @@ def run_qualification_suite():
                 F_override=data.get("F"),
                 clint_override=data.get("clint"),
                 clrenal_override=data.get("clrenal"),
-                # v2.7: Pass transporter parameters from reference_pk validation data
+                # v2.7: explicit transporter parameters (kept for back-compat)
                 is_uptake_substrate=data.get("is_uptake_substrate"),
                 vmax_uptake=data.get("vmax_uptake"),
                 km_uptake=data.get("km_uptake"),
                 Vmax_hepatic=data.get("Vmax_hepatic"),
                 Km_hepatic=data.get("Km_hepatic"),
+                # v5.1: forward all remaining advanced keys from reference_pk
+                **advanced_kwargs,
             )
 
-            # 2. FIXED: Run Simulation using run_single()
+            # 2. Run Simulation
             res = sim.run_single(
                 drug=profile,
                 dose_mg=data["dose"],
@@ -66,14 +101,14 @@ def run_qualification_suite():
             )
 
             results.append({
-                "Drug": name,
+                "Drug":      name,
                 "Pred_Cmax": res["cmax_plasma"],
-                "Obs_Cmax": data["cmax"],
+                "Obs_Cmax":  data["cmax"],
                 "Cmax_Fold": metrics["cmax"]["fold_error"],
-                "Pred_AUC": res["auc_plasma"],
-                "Obs_AUC": data["auc"],
-                "AUC_Fold": metrics["auc"]["fold_error"],
-                "Pass": "✓" if metrics["overall_pass"] else "✗"
+                "Pred_AUC":  res["auc_plasma"],
+                "Obs_AUC":   data["auc"],
+                "AUC_Fold":  metrics["auc"]["fold_error"],
+                "Pass":      "✓" if metrics["overall_pass"] else "✗"
             })
             print("✓" if metrics["overall_pass"] else "⚠")
 
@@ -87,11 +122,12 @@ def run_qualification_suite():
 
     df = pd.DataFrame(results)
     pass_rate = (df["Pass"] == "✓").mean() * 100
-    
+
     print(f"\n{'='*60}")
     print(df.to_string(index=False))
     print(f"\n Final Pass Rate: {pass_rate:.1f}%")
     print(f"{'='*60}\n")
+
 
 if __name__ == "__main__":
     run_qualification_suite()

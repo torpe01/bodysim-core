@@ -74,13 +74,34 @@ class ACATAbsorptionModule:
         # (Amidon et al. Pharm Res 1995; Yu et al. J Pharm Sci 1999)
         P_EFF_SCALE = 4800.0
 
-        # ── Effective permeability ─────────────────────────────────────────
-        # Use measured p_eff if available; otherwise Egan logP regression:
-        #   log10(Caco-2) ≈ 0.4 × logP − 5.5  [cm/s]  (Egan et al. 2000)
+        # ── Effective permeability ─────────────────────────────────────────────────
+        # Use measured p_eff if available (passed via reference_pk "p_eff" key).
+        # Otherwise estimate via dual-pathway model:
+        #
+        #   Transcellular: Egan logP regression (Egan et al. J Med Chem 2000)
+        #     p_trans = 10^(0.4×logP − 5.5)  [cm/s]
+        #     Good for logP > 1.5; under-estimates hydrophilic compounds.
+        #
+        #   Paracellular:  MW + H-bond donor corrected (Winiwarter et al.
+        #     J Med Chem 1998; Sun et al. Pharm Res 2002)
+        #     p_para = 1.5e-5 × exp(−0.010×max(0, MW−100)) × 0.85^HBD  [cm/s]
+        #     Dominant for small, polar molecules (MW<300, HBD<3).
+        #
+        #   Combined: p_eff = sqrt(p_trans^2 + p_para^2)
+        #     Geometric combination avoids double-counting the two pathways.
+        #     No ionisation correction here — the per-segment f_u loop below
+        #     already accounts for pH-dependent neutral fraction.
         logp  = drug.get("logp",  0.0)
+        mw    = float(drug.get("mw",   300.0))
+        hbd   = int(drug.get("hbd",   0))
         p_eff = drug.get("p_eff", None)
         if p_eff is None:
-            p_eff = float(np.clip(10.0 ** (0.4 * logp - 5.5), 1e-7, 2e-4))
+            p_trans = float(np.clip(10.0 ** (0.4 * logp - 5.5), 1e-8, 1e-3))
+            p_para  = float(np.clip(
+                1.5e-5 * np.exp(-0.010 * max(0.0, mw - 100.0)) * (0.85 ** hbd),
+                1e-9, 1e-4,
+            ))
+            p_eff = float(np.clip(np.sqrt(p_trans**2 + p_para**2), 1e-8, 5e-4))
 
         # ── Per-segment pH array ───────────────────────────────────────────
         try:
