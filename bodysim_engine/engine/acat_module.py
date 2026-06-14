@@ -61,6 +61,26 @@ class ACATAbsorptionModule:
           f_neutral = f_acid_neutral × f_base_neutral
           Requires pka dict with \"acid\" and \"base\" keys.
           Falls back to paracellular floor 0.02 for legacy scalar pka.
+
+        Gap 3 (v5.2) — Regional Absorption Windows:
+          drug["absorption_segments"]: optional list of ACAT segment indices
+          (0-6) where permeability-driven absorption (k_abs) is permitted.
+          Segments outside this list have k_abs forced to 0.0, reflecting a
+          true regional Peff collapse (e.g. furosemide ileal/colonic Peff
+          falls to ~0.01x its jejunal value due to complete ionization at
+          pH 7.4; Dahan et al. 2020 PMC7761534).  This is APPLIED AFTER the
+          existing p_eff x P_EFF_SCALE x fold_raw x f_u computation — purely
+          multiplicative gating.  Absent key -> all 7 segments remain active
+          (= list(range(7))), so existing drugs are numerically unchanged.
+
+        Gap 4 (v5.2) — Enteric-Coated Gastric Shielding:
+          drug["enteric_coated"]: optional bool (default False).  When True,
+          k_abs[0] (stomach) is forced to 0.0 — the intact coating prevents
+          any luminal absorption in the acidic gastric segment.  The dose
+          depot is also re-routed (see calculate_gut_flux) to empty directly
+          into LUMEN[1] (duodenum) rather than LUMEN[0] (stomach), modeling
+          coating dissolution at duodenal pH (>5.5) before drug release
+          (PPI MUPS formulation pharmaceutics).
         """
         # ── Transit rate constants ─────────────────────────────────────────
         kt = 1.0 / ACAT_TRANSIT_TIMES
@@ -172,6 +192,28 @@ class ACATAbsorptionModule:
             #                   × fold_raw[i] [–] × f_u[i] [–]
             k_abs[i] = float(p_eff * P_EFF_SCALE * fold_raw[i] * f_u[i])
 
+        # ── Gap 3 (v5.2): Regional Absorption Window Gating ──────────────
+        # Restrict permeability-driven absorption to the segments where the
+        # drug has measurable Peff (e.g. furosemide: proximal SI only, per
+        # Dahan et al. 2020 — Peff collapses ~100x in the ileum due to
+        # complete ionization at pH 7.4).  Absent key -> no restriction.
+        _absorption_segments = drug.get("absorption_segments", None)
+        if _absorption_segments is not None:
+            _allowed = set(int(s) for s in _absorption_segments)
+            for i in range(N_ACAT_SEGMENTS):
+                if i not in _allowed:
+                    k_abs[i] = 0.0
+
+        # ── Gap 4 (v5.2): Enteric-Coated Gastric Shielding ───────────────
+        # An intact enteric coating prevents any luminal absorption while
+        # the dose resides in the acidic stomach segment (segment 0).
+        # The coating dissolves only after the bolus reaches the duodenum
+        # (pH > 5.5) — see calculate_gut_flux for the corresponding
+        # dose-depot routing change.
+        enteric_coated = bool(drug.get("enteric_coated", False))
+        if enteric_coated:
+            k_abs[0] = 0.0
+
         # ── Module P1: Gut-Wall Metabolism Availability Fraction ──────────
         # F_gut = Q_gut / (Q_gut + fu_gut × CLint_gut_cyp3a4)
         # Default: F_gut_scalar = 1.0 (no gut-wall extraction).
@@ -208,6 +250,7 @@ class ACATAbsorptionModule:
             "Vmax_gut_active":     Vmax_gut_active,
             "Km_gut_active":       Km_gut_active,
             "gut_active_segments": gut_active_segments,
+            "enteric_coated":      enteric_coated,
         }
 
     def calculate_gut_flux(
@@ -275,6 +318,14 @@ class ACATAbsorptionModule:
         _J_bile_emp_pre   = _k_bile_empty_pre * A_bile
         J_bile_reabs      = _f_reabs_pre * _J_bile_emp_pre    # [mg/h] → LUMEN[1]
 
+        # ── Gap 4 (v5.2): Enteric-coated dose-depot routing ───────────────
+        # Intact coating survives the stomach; the bolus empties directly
+        # into the duodenum (LUMEN[1]) once gastric residence time elapses,
+        # rather than into the stomach lumen (LUMEN[0]).  kt_arr[0] (4 h⁻¹)
+        # is retained as the physiological gastric-residence transit rate —
+        # only the destination segment changes.
+        enteric_coated = ac.get("enteric_coated", False)
+
         # ── Main ACAT loop ─────────────────────────────────────────────────
         total_abs_flux = 0.0
         dydt_lumen     = np.zeros(N_ACAT_SEGMENTS)
@@ -282,9 +333,20 @@ class ACATAbsorptionModule:
         for i in range(N_ACAT_SEGMENTS):
             # Incoming transit mass flux [mg/h]
             if i == 0:
-                # Stomach: physiological gastric emptying (kt[0] = 4 h⁻¹).
-                # P-gp re-absorbed efflux re-enters here as well.
-                in_transit = kt_arr[0] * A_dose_depot + ka_reabs * A_glu_eff
+                if enteric_coated:
+                    # Stomach receives no dose-depot inflow; only carries
+                    # whatever transits in from upstream (none, by
+                    # construction) plus any P-gp-reabsorbed efflux.
+                    in_transit = ka_reabs * A_glu_eff
+                else:
+                    # Stomach: physiological gastric emptying (kt[0] = 4 h⁻¹).
+                    # P-gp re-absorbed efflux re-enters here as well.
+                    in_transit = kt_arr[0] * A_dose_depot + ka_reabs * A_glu_eff
+            elif i == 1 and enteric_coated:
+                # Duodenum receives the full dose-depot bolus directly
+                # (coating dissolves at duodenal pH), plus normal upstream
+                # transit from the stomach segment.
+                in_transit = kt_arr[0] * A_dose_depot + kt_arr[i - 1] * M_lumen[i - 1]
             else:
                 in_transit = kt_arr[i - 1] * M_lumen[i - 1]
 

@@ -261,8 +261,12 @@ REFERENCE_PK = {
         "route":     "oral",
         "cmax":      1.1,
         "auc":       3.4,
-        "ka":        1.3,
-        "F":         0.61,
+        # ka removed v5.2: not consumed as an absorption flux (calculate_gut_flux
+        # is fully p_eff/k_abs-driven); retained ka would only ever be read for
+        # ka_reabs (P-gp reabsorption), where the engine default is sufficient.
+        # F removed v5.2: not read by odes(); ACAT + absorption_segments fully
+        # determine bioavailability mechanistically. Retaining F risked a future
+        # double-count if a bioavailability bridge were added later.
         "clint":     2.0,
         "clrenal":   8.0,
         # Measured human intestinal Peff at pH 6.5 (proximal jejunum, absorption window).
@@ -270,6 +274,13 @@ REFERENCE_PK = {
         # BCS Class IV: absorption limited to segments 1-2 (duodenum/upper jejunum).
         # Source: [Dahan et al., Pharmaceutics 2020;12(12):1175 PMC7761534]
         "p_eff":       1.4e-5,   # [cm/s]  # Source: [Dahan et al., Pharmaceutics 2020;12:1175 PMC7761534 — rat SPIP human-scaled]
+        # Gap 3 (v5.2) — Regional Absorption Window restriction.
+        # BCS Class IV: Peff collapses ~100x distal to the upper jejunum as
+        # luminal pH rises toward 7.4 and the drug (pKa=3.90, acidic) becomes
+        # essentially fully ionized. Restrict mechanistic absorption to
+        # segments 1-2 (duodenum/upper jejunum) per the measured absorption
+        # window. [Dahan et al., Pharmaceutics 2020;12:1175 PMC7761534]
+        "absorption_segments": [1, 2],
         # Empirical Vd correction: fup=0.02 highly-bound acidic drug; R&R over-predicts tissue Kp.
         # Literature Vd ≈ 0.11 L/kg → requires kp_scalar correction.
         # Source: [FDA PBPK Guidance 2018 — empirical Vd correction for highly-bound acidic drugs]
@@ -680,14 +691,24 @@ REFERENCE_PK = {
         "route":     "oral",
         "cmax":      0.45,
         "auc":       1.2,
-        "ka":        1.5,
-        "F":         0.35,
+        # ka, F removed v5.2: not consumed by odes(); p_eff + enteric_coated
+        # (below) fully and mechanistically determine gastric shielding and
+        # absorption — no lumped-bioavailability bridge exists in the engine.
         "clint":     45.0,
         "clrenal":   0.05,
         # Measured Peff for enteric-coated omeprazole reaching jejunum intact.
         # Dual-pathway gives ~2.5e-5; PAMPA measured ~8e-5 cm/s.
         # [Artursson & Karlsson, Biochem Biophys Res Commun 1991;175:880]
         "p_eff":     8.0e-5,   # [cm/s]
+        # Gap 4 (v5.2) — Enteric-Coated Gastric Shielding.
+        # Omeprazole degrades within ~2 min at gastric pH 1.0 and is therefore
+        # formulated as enteric-coated pellets (MUPS). The coating prevents
+        # both degradation and any luminal absorption in the stomach segment;
+        # the intact bolus reaches the duodenum (pH > 5.5) before dissolving.
+        # Mechanistically replaces the lumped F=0.35 (acid-degradation +
+        # first-pass) bridge that the engine never read.
+        # [FDA label; standard PPI MUPS formulation pharmaceutics]
+        "enteric_coated": True,
     },
 
     # v5.0 — Finding 1: gut_transporter added (Module P5, OCT1/OCT3 influx).

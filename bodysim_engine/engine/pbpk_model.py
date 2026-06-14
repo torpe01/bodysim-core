@@ -438,7 +438,7 @@ class PBPKModel(ACATAbsorptionModule, HepaticClearanceModule, RenalEliminationMo
         Rb  = self.drug["Rb"]
         tp  = self._tp
         ac  = self._acat
-        ka  = self.drug["ka"]
+        ka  = self.drug.get("ka", 1.0)
 
         # ── Flows ──────────────────────────────────────────────────────────
         Q_ha  = q["liver_hepatic"]
@@ -726,6 +726,43 @@ class PBPKModel(ACATAbsorptionModule, HepaticClearanceModule, RenalEliminationMo
         }
 
     # ── NCA helper ─────────────────────────────────────────────────────────────
+    def _estimate_mat_h(self) -> float:
+        """
+        Gap 6 (v5.2) — Mean Absorption Time, derived from the ACAT model's
+        own per-segment rate constants (self._acat["kt"], ["k_abs"]) rather
+        than a fictitious single-compartment `ka`.
+
+        For each segment i with active permeability-driven absorption
+        (k_abs[i] > 0), mass entering that segment either transits onward
+        (rate kt[i]) or is absorbed (rate k_abs[i]); the expected residence
+        time contributed by segment i is 1 / (kt[i] + k_abs[i]).  Segments
+        with k_abs[i] == 0 (e.g. zeroed by absorption_segments or
+        enteric_coated, Gaps 3/4) contribute only transit time 1/kt[i], since
+        mass simply passes through without being absorbed there.
+
+        MAT = sum over i=0..6 of the segment residence time, restricted to
+        segments up to and including the last segment with k_abs[i] > 0
+        (mass absorbed beyond that point no longer contributes to the
+        absorption-phase delay of the *absorbed* dose).  If no segment has
+        k_abs[i] > 0 (fully SLC/transporter-driven absorption, e.g.
+        Metformin/Amoxicillin), fall back to the duodenal transit time
+        1/kt[1] as a minimal physiological estimate.
+        """
+        kt     = self._acat["kt"]
+        k_abs  = self._acat["k_abs"]
+
+        active_idx = np.nonzero(k_abs > 1e-12)[0]
+        if active_idx.size == 0:
+            return float(1.0 / kt[1]) if kt[1] > 1e-12 else 0.0
+
+        last_active = int(active_idx[-1])
+        mat = 0.0
+        for i in range(last_active + 1):
+            denom = kt[i] + k_abs[i]
+            if denom > 1e-12:
+                mat += 1.0 / denom
+        return float(mat)
+
     def _calculate_nca(self, t: np.ndarray, plasma: np.ndarray,
                        dose_mg: float, route: str) -> dict:
         """
@@ -787,8 +824,19 @@ class PBPKModel(ACATAbsorptionModule, HepaticClearanceModule, RenalEliminationMo
             if route == "iv":
                 vss = float(cl_total * mrt)
             else:
-                ka  = float(self.drug.get("ka", 1.5))
-                mat = 1.0 / ka if ka > 1e-6 else 0.0
+                # Gap 6 (v5.2) — Model-derived Mean Absorption Time.
+                # `self.drug.get("ka", 1.5)` previously assumed a single
+                # first-order absorption compartment, but absorption is
+                # entirely ACAT/p_eff-driven (calculate_gut_flux); `ka` does
+                # not represent the absorption rate for any p_eff drug and is
+                # frequently absent. MAT is instead derived analytically from
+                # the same per-segment rate constants the ODE actually uses:
+                # mean residence time in the absorbable pool is the
+                # transit-weighted sum of (1/kt[i] + 1/k_abs[i]) over the
+                # segments where absorption is active (k_abs[i] > 0), i.e.
+                # the expected time for mass to either transit out or be
+                # absorbed, summed across the absorption window.
+                mat = self._estimate_mat_h()
                 mrt_iv_equiv = mrt - mat
                 if mrt_iv_equiv > 0.0:
                     vss = float(cl_total * mrt_iv_equiv)
