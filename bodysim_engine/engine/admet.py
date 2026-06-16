@@ -88,6 +88,57 @@ PLASMA_PROTEINS = {
     "globulins": 25.0,
 }
 
+# ═══════════════════════════════════════════════════════════════════════════
+# ENGINEERING POLICY CONSTANTS — HEPATIC UPTAKE DOMINANCE GATE (Step 1, v5.2)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# These three constants parameterise the decision of whether active hepatic
+# uptake is dominant enough to exempt the liver compartment from the global
+# empirical kp_scalar correction in build_drug_profile().
+#
+# They are ENGINEERING POLICY CHOICES, not published physiological constants.
+# They are defined here as named, documented module-level constants (rather
+# than inline magic numbers) so they are easy to locate, review, and revise
+# as the drug validation set grows, and so that the companion pre-flight
+# script (preflight_check_dominance_gate.py, Step 1e) can be kept in
+# numerical sync by importing from a single source or by explicit annotation.
+#
+# _LIVER_CL_PASSIVE_TYPICAL_LH:
+#   A representative passive hepatic clearance baseline (L/h) against which
+#   active linear clearance (Vmax/Km) is compared to form the dominance ratio.
+#   Set to 10.0 L/h to match the liver_CL_pd default in hepatic_module.py.
+#   If that default is ever changed, this constant must be updated to stay
+#   consistent with it.
+#
+# _LIVER_DOMINANCE_RATIO:
+#   If (vmax_uptake / km_uptake) / _LIVER_CL_PASSIVE_TYPICAL_LH exceeds this
+#   threshold, the liver is classified as "dominant" and exempted from
+#   kp_scalar.  Set to 3.0 (i.e. active CL at least 3× passive baseline).
+#   Atorvastatin: 500/3 ≈ 167 L/h → ratio ≈ 16.7 >> 3 → exempt.
+#   Literature support: Bteich et al. PMC7065931 — OATP-driven hepatic
+#   distribution collapses to passive-only when uptake is inhibited.
+#
+# _LIVER_BORDERLINE_RATIO:
+#   A lower triage band between 1.0× and _LIVER_DOMINANCE_RATIO.  A drug
+#   landing here is logged as "borderline" for human review rather than
+#   silently classified as "minor" (no exemption applied today, but visible
+#   for future revision of the dominance model to support a partial-exemption
+#   tier).  Does not change runtime behaviour for current reference drugs.
+#
+# NOTE: the preflight_check_dominance_gate.py script (Step 1e) contains a
+# mirror copy of these three values.  If you change any value here, also
+# update that script — or, better, factor both into engine/constants.py
+# and import from there to prevent silent numerical drift.
+
+_LIVER_CL_PASSIVE_TYPICAL_LH = 10.0   # L/h — passive hepatic CL baseline
+                                        # (matches hepatic_module liver_CL_pd)
+_LIVER_DOMINANCE_RATIO       = 3.0    # active/passive ratio above which the
+                                        # liver is exempted from kp_scalar
+_LIVER_BORDERLINE_RATIO      = 1.0    # below DOMINANCE_RATIO but above this:
+                                        # logged as "borderline" for human
+                                        # review, not silently bucketed as
+                                        # "minor" (no runtime change today)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # IONIZATION CHEMISTRY (Henderson-Hasselbalch)
@@ -936,15 +987,90 @@ def build_drug_profile(name, logp, fup, mw, pka=None,
     cl_params = estimate_clearance(logp, fup, mw, drug_type, pka, cyp3a4_activity, egfr_ml_min, descriptors)
     rb = blood_plasma_ratio(logp, drug_type, pka, fup)
 
-    # ── kp_scalar: apply empirical Vd correction to all organ Kp values ──────
+    # ── Step 1b (v5.2): Hepatic uptake dominance gate ────────────────────────
+    # Determine whether active hepatic uptake is dominant enough to exempt the
+    # liver from the global kp_scalar correction.  A bare is_uptake_substrate
+    # boolean is insufficient: it cannot distinguish a drug where transport is
+    # the primary clearance mechanism (e.g. Atorvastatin, OATP1B1/1B3) from
+    # one with only a minor active component layered on dominant passive
+    # partitioning.  Exempting the liver for the latter would under-correct Vd.
+    #
+    # Dominance is computed from the linear active clearance approximation:
+    #   CL_active_linear = vmax_uptake / km_uptake   [L/h]
+    # compared against the passive baseline _LIVER_CL_PASSIVE_TYPICAL_LH.
+    #
+    # Triage outcomes:
+    #   dominant               → _uptake_dominant=True; liver exempted below.
+    #   borderline             → logged as INFO for human review; not exempted.
+    #   minor                  → silently not exempted (ratio ≤ borderline).
+    #   indeterminate_missing  → WARNING printed; conservative path taken
+    #                            (full kp_scalar applied to liver), not silent.
+    #
+    # Constants are defined at module level (_LIVER_CL_PASSIVE_TYPICAL_LH,
+    # _LIVER_DOMINANCE_RATIO, _LIVER_BORDERLINE_RATIO) to avoid inline magic
+    # numbers and to keep the pre-flight script (Step 1e) in sync.
+    _uptake_dominant          = False
+    _uptake_dominance_status  = "not_applicable"   # for diagnostics / logging
+
+    if is_uptake_substrate:
+        if vmax_uptake and km_uptake and float(km_uptake) > 0.0:
+            _cl_active_linear = float(vmax_uptake) / float(km_uptake)
+            _ratio = _cl_active_linear / _LIVER_CL_PASSIVE_TYPICAL_LH
+            if _ratio > _LIVER_DOMINANCE_RATIO:
+                _uptake_dominant          = True
+                _uptake_dominance_status  = "dominant"
+            elif _ratio > _LIVER_BORDERLINE_RATIO:
+                _uptake_dominance_status  = "borderline"
+                print(
+                    f"[v5.2 INFO] '{name}': active/passive hepatic clearance "
+                    f"ratio={_ratio:.2f} is between {_LIVER_BORDERLINE_RATIO} "
+                    f"and {_LIVER_DOMINANCE_RATIO} — borderline mixed passive/"
+                    f"active handling. Liver exemption NOT applied (binary "
+                    f"gate today), but flagging for human review."
+                )
+            else:
+                _uptake_dominance_status  = "minor"
+        else:
+            # is_uptake_substrate=True but vmax_uptake/km_uptake are missing,
+            # zero, or invalid — dominance check cannot be computed.  Do NOT
+            # silently exempt the liver (un-evidenced correction) and do NOT
+            # silently fall back either — this is a likely data-entry gap that
+            # must be visible in validate_drugs.py console output.
+            _uptake_dominance_status = "indeterminate_missing_kinetics"
+            print(
+                f"[v5.2 WARNING] '{name}': is_uptake_substrate=True but "
+                f"vmax_uptake/km_uptake is missing or invalid "
+                f"(vmax_uptake={vmax_uptake!r}, km_uptake={km_uptake!r}). "
+                f"Liver kp_scalar exemption NOT applied — falling back to the "
+                f"full kp_scalar for all organs. Add vmax_uptake/km_uptake to "
+                f"this drug's reference_pk.py entry to enable the dominance "
+                f"check, or confirm this drug genuinely has no calibrated "
+                f"uptake kinetics."
+            )
+
+    # ── Step 1c (v5.2): Gated kp_scalar loop with liver exemption ────────────
     # Applied BEFORE kp_overrides so that organ-specific absolute overrides
     # take precedence (they are not scaled — only the predicted values are).
-    # kp_scalar = 1.0 (default) → no change; all existing calls unaffected.
+    # kp_scalar = 1.0 (default) → loop body never executes; all existing
+    # calls with no kp_scalar are completely unaffected.
+    #
+    # When _uptake_dominant is True, the liver is added to _exempt_organs and
+    # its Kp value is left at the mechanistically-estimated (unsuppressed)
+    # value.  All peripheral organs (muscle, fat, skin, kidney, etc.) are
+    # still scaled normally by kp_scalar — peripheral Vd correction is intact.
+    #
+    # When _uptake_dominant is False (dominant check failed, missing kinetics,
+    # or is_uptake_substrate is falsy), _exempt_organs is empty and the loop
+    # behaves identically to the pre-Step-1 code — zero regression for the
+    # other 21 drugs.
     #
     # Clamp Kp floor at 0.05 after scaling to prevent numerical issues in
     # perfusion-limited compartments where Kp approaches zero.
     if kp_scalar != 1.0:
+        _exempt_organs = {"liver"} if _uptake_dominant else set()
         for _organ in kp_result["kp"]:
+            if _organ in _exempt_organs:
+                continue
             kp_result["kp"][_organ] = max(0.05, kp_result["kp"][_organ] * kp_scalar)
 
     # Caller-supplied explicit MM kinetics (validated, dimensionally consistent mg/h + mg/L).

@@ -137,7 +137,7 @@ class PBPKModel(ACATAbsorptionModule, HepaticClearanceModule, RenalEliminationMo
             merged["liver_CL_pd"] = cl_pd
 
         return merged
-
+    
     # ── Validation ─────────────────────────────────────────────────────────────
     def _validate(self):
         required_kp = ["liver", "kidney", "brain", "heart", "muscle", "fat",
@@ -406,6 +406,7 @@ class PBPKModel(ACATAbsorptionModule, HepaticClearanceModule, RenalEliminationMo
           All other compartments assembled here from their standard perfusion equations.
         """
         y = np.maximum(y, 0.0)
+        
 
         # ── Unpack state vector ────────────────────────────────────────────
         C_art        = y[ART]
