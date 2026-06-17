@@ -34,7 +34,8 @@ _ADVANCED_KEYS = [
     "Vmax_hepatic",         # Explicit Michaelis-Menten hepatic Vmax [mg/h]
     "Km_hepatic",           # Explicit Michaelis-Menten hepatic Km [mg/L]
     "absorption_segments",  # Gap 3 — regional absorption window restriction
-    "enteric_coated",       # Gap 3 — enteric-coated release flag
+    "enteric_coated",       # Gap 4 — enteric-coated release flag
+    "peff_is_measured_net", # v5.2 Step 2 — skip f_u when p_eff is human in vivo net Peff
 ]
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -62,13 +63,8 @@ def run_qualification_suite():
             # 1. Build Profile using ADMET with REAL measured properties
             # (logp, fup, mw, pka, drug_type from reference_pk.py)
             # Use clinical PK parameters (ka, F, CLint, CLrenal) when available.
-            # v5.1 FIX: the explicit transporter/MM kwargs (is_uptake_substrate,
-            # vmax_uptake, km_uptake, Vmax_hepatic, Km_hepatic) were previously
-            # passed BOTH by name AND inside **advanced_kwargs (since they are
-            # also members of _ADVANCED_KEYS), causing
-            # "got multiple values for keyword argument" TypeErrors for any
-            # drug whose reference_pk entry defines them. They are now forwarded
-            # exclusively via **advanced_kwargs.
+            # v2.7: explicit transporter params passed by name (unchanged).
+            # v5.1: all remaining advanced module params forwarded via **advanced_kwargs.
             profile = build_drug_profile(
                 name=name,
                 logp=data["logp"],
@@ -81,8 +77,11 @@ def run_qualification_suite():
                 F_override=data.get("F"),
                 clint_override=data.get("clint"),
                 clrenal_override=data.get("clrenal"),
-                # v5.1: all advanced module params (including transporter/MM
-                # kinetics) forwarded via **advanced_kwargs — see _ADVANCED_KEYS.
+                # v5.1 FIX: is_uptake_substrate / vmax_uptake / km_uptake /
+                # Vmax_hepatic / Km_hepatic are already in _ADVANCED_KEYS —
+                # passing them again here by name caused "got multiple
+                # values for keyword argument" TypeErrors. They are now
+                # forwarded exclusively via **advanced_kwargs.
                 **advanced_kwargs,
             )
 

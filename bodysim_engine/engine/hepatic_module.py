@@ -68,7 +68,69 @@ class HepaticClearanceModule:
         C_liv_tiss = extra["C_liv_tiss"]
 
         C_vascular_free = fup * C_liv_vasc
-        C_tissue_free   = fup * C_liv_tiss / kp["liver"]
+        # NOTE: C_tissue_free is now computed below by the unified parallel-
+        # binding conservation quadratic (v5.3 Target 2), which solves for it
+        # directly from C_liv_tiss, kp["liver"], fup, and tmdd_params in one
+        # step. It is no longer pre-computed here as a separate passive-only
+        # quantity that a subsequent TMDD step would rescale.
+
+        # ── Module P7: TMDD Parallel Binding Sinks (Unified Conservation Quadratic) ──
+        # v5.3 Target 2 — REPLACES the v5.2 Step 3 f_tmdd_free partition, which
+        # treated C_tissue_free (already Kp-attenuated) as the naive-free input
+        # to a Langmuir isotherm. That approach sequentially filtered the same
+        # free-drug pool through two binding mechanisms that both implicitly
+        # account for albumin affinity — Rodgers-Rowland's kp["liver"] (derived
+        # from fup, so it already encodes passive protein-binding-driven tissue
+        # retention) and the explicit Bmax/Kd TMDD term (e.g. Warfarin's
+        # "VKORC1 + deep albumin depot", per reference_pk.py) — multiplicatively
+        # compounding the same physical attenuation instead of summing two
+        # genuinely distinct binding capacities.
+        #
+        # Unified conservation equation (v5.3_physiological_mechanics_blueprint.md
+        # Section 3): passive (Kp-implied, linear) and specific (Bmax/Kd,
+        # saturable) binding are modeled as PARALLEL sinks competing for one
+        # shared free-drug pool, not sequential filters:
+        #
+        #   C_liv_tiss_total = C_free + C_bound_passive + C_bound_specific
+        #
+        #   C_bound_passive  = (kp["liver"]/fup - 1) * C_free      (linear)
+        #   C_bound_specific = Bmax * C_free / (Kd + C_free)       (saturable)
+        #
+        # Substituting and collecting terms in C_free yields the single
+        # quadratic:
+        #   a*C_free^2 + b*C_free + c = 0
+        #     a = passive_ratio + 1.0                  (= kp["liver"]/fup)
+        #     b = (passive_ratio + 1.0)*Kd + Bmax - C_liv_tiss_total
+        #     c = -Kd * C_liv_tiss_total
+        #
+        # tmdd_params absent (Bmax=0) → quadratic reduces exactly to the
+        # original passive-only relation: a=kp/fup, b=a*Kd, c=-Kd*C_total
+        # → C_free = C_total / a = fup*C_total/kp["liver"], i.e. IDENTICAL to
+        # the pre-v5.3 formula. Zero regression for all non-TMDD drugs.
+        C_liv_tiss_total = max(C_liv_tiss, 0.0)
+        passive_ratio     = (kp["liver"] / fup) - 1.0
+
+        _tmdd = drug.get("tmdd_params", None)
+        _Bmax = 0.0
+        _Kd   = 1.0
+        if _tmdd is not None:
+            _Bmax = float(_tmdd.get("Bmax_mg_L", 0.0))
+            _Kd   = float(_tmdd.get("Kd_mg_L",   1.0))
+            if _Bmax <= 0.0 or _Kd <= 1e-12:
+                _Bmax = 0.0  # invalid/disabled tmdd_params → behaves as absent
+
+        _a = passive_ratio + 1.0
+        _b = _a * _Kd + _Bmax - C_liv_tiss_total
+        _c = -_Kd * C_liv_tiss_total
+
+        if _a > 1e-15:
+            _disc = max(_b * _b - 4.0 * _a * _c, 0.0)
+            C_tissue_free = (-_b + np.sqrt(_disc)) / (2.0 * _a)
+            C_tissue_free = max(C_tissue_free, 0.0)
+        else:
+            # Degenerate a (kp["liver"]/fup ≈ 0) — fall back to the
+            # pre-existing mechanistic relation rather than divide by zero.
+            C_tissue_free = fup * C_liv_tiss_total / max(kp["liver"], 1e-9)
 
         # ── Blood-unit concentrations (for convective flows) ───────────────
         C_art_blood           = extra["C_art_blood"]
@@ -81,15 +143,20 @@ class HepaticClearanceModule:
         Q_liv = Q_ha + Q_pv
 
         # ── Module P6: Protein-Facilitated Hepatic Uptake ─────────────────
-        # For OATP substrates with fup < 0.05, albumin presents drug at the
-        # sinusoidal membrane at an effective fu ≈ 0.15 (Tsao et al. 2020;
-        # Poulin & Theil 2009; Noe et al. 2007).
+        # For OATP substrates with fup below albumin_facilitation_threshold,
+        # albumin presents drug at the sinusoidal membrane at an effective
+        # fu floor of albumin_facilitation_eff (Tsao et al. 2020; Poulin &
+        # Theil 2009; Noe et al. 2007). Defaults (0.05, 0.15) match the prior
+        # hardcoded literature-derived values exactly — zero behavior change
+        # for any drug entry that does not override them in reference_pk.py.
         # C_enhanced is used ONLY for active uptake loops; all other free-drug
         # terms retain fup unchanged.
         is_uptake_substrate = drug.get("is_uptake_substrate", False)
+        albumin_facilitation_threshold = drug.get("albumin_facilitation_threshold", 0.05)
+        albumin_facilitation_eff       = drug.get("albumin_facilitation_eff", 0.15)
 
-        if fup < 0.05 and is_uptake_substrate:
-            _fu_eff    = max(fup, 0.15)
+        if fup < albumin_facilitation_threshold and is_uptake_substrate:
+            _fu_eff    = max(fup, albumin_facilitation_eff)
             C_enhanced = C_liv_vasc * _fu_eff
         else:
             C_enhanced = C_vascular_free
@@ -125,6 +192,25 @@ class HepaticClearanceModule:
         #   J_cyp = CLh [L/h] × C_tissue_free [mg/L]
         #   No default Km.  The prior `get("Km_hepatic", 1.0)` fallback that
         #   spuriously activated MM for every drug is completely removed.
+        #
+        # v5.3 Target 1 REVERTED: an earlier revision drove J_cyp/J_phaseII
+        # from a flux-weighted blend of C_enhanced (vascular-coupled) and
+        # C_tissue_free (tissue-coupled), intended to unify the basis between
+        # active uptake and metabolism. That blend introduced a derivative
+        # discontinuity: f_active_inflow's denominator included the
+        # instantaneous, bidirectional j_passive term, which can approach
+        # zero or change sign as C_vascular_free and C_tissue_free cross,
+        # producing a non-smooth, potentially cliff-like f_active_inflow
+        # response that is hostile to adaptive-step ODE solvers (e.g. CVODE
+        # step-rejection/order-reduction). It also blended a vascular-
+        # compartment concentration into what should be a strictly
+        # tissue-compartment metabolic substrate, breaking spatial
+        # compartmentalization. Since Target 2's unified conservation
+        # quadratic now correctly computes C_tissue_free as the true,
+        # non-double-discounted intracellular free concentration (passive
+        # AND specific binding both already accounted for there), the
+        # metabolic enzymes are restored to act strictly on C_tissue_free —
+        # continuous, differentiable, and spatially consistent.
         # ──────────────────────────────────────────────────────────────────
         CLh      = drug["CLint"]
         _vmax_raw = drug.get("Vmax_hepatic")
@@ -175,21 +261,6 @@ class HepaticClearanceModule:
         # Total metabolic rate: CYP + Phase II + biliary secretion [mg/h]
         metabolic_rate = J_cyp + J_phaseII + J_bile_secretion
 
-        # ── Module P7: TMDD Quasi-Steady State ───────────────────────────
-        # f_tmdd_scale = 1 / (1 + Bmax × Kd / (Kd + C_tissue_free)²)
-        # Slows dC_liv_tiss/dt to reflect large target-bound pool at QSS.
-        # tmdd_params absent → f_tmdd_scale = 1.0 (zero change for all drugs).
-        _tmdd        = drug.get("tmdd_params", None)
-        f_tmdd_scale = 1.0
-
-        if _tmdd is not None:
-            _Bmax = float(_tmdd.get("Bmax_mg_L", 0.0))
-            _Kd   = float(_tmdd.get("Kd_mg_L",   1.0))
-            if _Bmax > 0.0 and _Kd > 1e-12:
-                _kd_plus_c   = max(_Kd + C_tissue_free, 1e-12)
-                _sensitivity = _Bmax * _Kd / (_kd_plus_c ** 2)
-                f_tmdd_scale = 1.0 / (1.0 + _sensitivity)
-
         # ── LIV_VASC ODE ──────────────────────────────────────────────────
         # Three flux categories (see inline doc in original pbpk_model.py):
         #   A. Convective (blood units: Q × C_plasma × Rb)
@@ -206,9 +277,16 @@ class HepaticClearanceModule:
 
         # ── LIV_TISS ODE ──────────────────────────────────────────────────
         # All inbound mass (active + passive) minus metabolic sink.
-        # TMDD scaling applied to the complete expression (P7).
-        # Dimensional: ([mg/h] / L) × [–] = mg/(L·h) ✓
-        dydt_liv_tiss = f_tmdd_scale * (
+        # v5.2 Step 3 / v5.3 Target 2: TMDD's effect is captured entirely
+        # upstream via the unified parallel-binding conservation quadratic
+        # that produces C_tissue_free, which directly drives J_cyp and
+        # J_phaseII above (Target 1's flux-weighted blend was reverted for
+        # numerical-stability and spatial-compartmentalization reasons —
+        # see the note above J_cyp). C_liv_tiss (this state's own
+        # derivative) is NOT touched by TMDD at all — its full,
+        # un-suppressed mass balance is preserved.
+        # Dimensional: ([mg/h] / L) = mg/(L·h) ✓
+        dydt_liv_tiss = (
             active_uptake_liv * C_enhanced    # P6: protein-facilitated [mg/h]
             + j_uptake                        # generic active influx [mg/h]
             + j_passive                       # passive diffusion (bidirectional) [mg/h]

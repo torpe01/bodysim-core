@@ -81,6 +81,17 @@ class ACATAbsorptionModule:
           into LUMEN[1] (duodenum) rather than LUMEN[0] (stomach), modeling
           coating dissolution at duodenal pH (>5.5) before drug release
           (PPI MUPS formulation pharmaceutics).
+
+        v5.2 Step 2 — Measured Human In Vivo Net Peff Bypass:
+          drug["peff_is_measured_net"]: optional bool (default False).  When
+          True, drug["p_eff"] is treated as already reflecting net effective
+          permeability (ionization + pH-partition effects already netted out
+          by the in vivo SPIP/perfusion methodology), so the per-segment
+          f_u[i] ionization correction is NOT applied to k_abs[i] — applying
+          it on top of a measured net value would double-count the
+          ionization penalty.  f_u[i] is still computed for every segment
+          (other logic may depend on it); only its use in k_abs[i] is
+          gated.  Absent key -> False -> no change from prior behavior.
         """
         # ── Transit rate constants ─────────────────────────────────────────
         kt = 1.0 / ACAT_TRANSIT_TIMES
@@ -150,6 +161,17 @@ class ACATAbsorptionModule:
         f_u   = np.zeros(N_ACAT_SEGMENTS)
         k_abs = np.zeros(N_ACAT_SEGMENTS)
 
+        # ── v5.2 Step 2: measured human in vivo net Peff bypass ────────────
+        # When p_eff is sourced from a human in vivo SPIP/perfusion study
+        # (e.g. Dahan et al. 2020 for Furosemide, Dahlgren et al. 2016 for
+        # Metoprolol), it already reflects net effective permeability
+        # including ionization/pH-partition effects observed in situ.
+        # Re-applying the per-segment f_u[i] ionization correction on top of
+        # such a measured value double-counts the ionization penalty.
+        # Absent key -> False -> f_u[i] is applied as before (no change for
+        # any drug sourced from QSPR/Caco-2 estimates).
+        peff_is_measured_net = bool(drug.get("peff_is_measured_net", False))
+
         for i in range(N_ACAT_SEGMENTS):
             seg_ph = float(seg_ph_arr[i])
 
@@ -190,7 +212,18 @@ class ACATAbsorptionModule:
             # Absorption rate constant: geometric × anatomical × ionization
             # k_abs[i] [h⁻¹] = p_eff [cm/s] × P_EFF_SCALE [h⁻¹/(cm/s)]
             #                   × fold_raw[i] [–] × f_u[i] [–]
-            k_abs[i] = float(p_eff * P_EFF_SCALE * fold_raw[i] * f_u[i])
+            #
+            # v5.2 Step 2: if p_eff is a measured human in vivo net
+            # effective permeability, f_u[i] is NOT applied here — the
+            # measured value already nets out ionization in situ, so
+            # multiplying by f_u[i] again would double-count it.
+            # f_u[i] itself is still computed above for every segment
+            # (other downstream logic may depend on it) — only its
+            # application to k_abs[i] is gated.
+            if peff_is_measured_net:
+                k_abs[i] = float(p_eff * P_EFF_SCALE * fold_raw[i])
+            else:
+                k_abs[i] = float(p_eff * P_EFF_SCALE * fold_raw[i] * f_u[i])
 
         # ── Gap 3 (v5.2): Regional Absorption Window Gating ──────────────
         # Restrict permeability-driven absorption to the segments where the

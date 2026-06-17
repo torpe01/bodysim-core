@@ -225,8 +225,14 @@ REFERENCE_PK = {
         # kp_scalar — empirical Vd correction for highly-bound lipophilic acid
         # v5.1 FIX: 0.3 → 0.05. With data bridge active, 0.3 gives Cmax ~20×
         # over-predicted. R&R Kp ~12 inflates central Vd >> observed ~25 L.
+        # v5.2 REVERT: 0.05 → 0.3. Step 1c dominance gate now exempts the
+        # liver from kp_scalar when OATP uptake is dominant (ratio ≈ 16.7 >>
+        # _LIVER_DOMINANCE_RATIO=3.0). The 0.05 floor was a compensatory
+        # workaround for the over-suppressed hepatic Kp; with the liver safely
+        # exempted, the robust v5.0 entry value of 0.3 is correct for the
+        # peripheral organs and should be restored.
         # [FDA PBPK Guidance 2018]
-        "kp_scalar":             0.05,
+        "kp_scalar":             0.3,
     },
 
     "Digoxin": {
@@ -291,6 +297,12 @@ REFERENCE_PK = {
         # Source: [Pichette & Lapointe, Clin Pharmacokinet 1999;36:1]
         "cl_bile_lh":    0.8,    # [L/h]  [Pichette & Lapointe 1999]
         "f_reabs_bile":  0.02,   # [–]  # Source: [Pichette & Lapointe, Clin Pharmacokinet 1999;36:1 — <5% biliary excretion]
+        # v5.2 Step 2 — p_eff is a human in vivo net effective permeability
+        # (Dahan 2020 rat SPIP human-scaled; includes active efflux, intracellular
+        # binding, and paracellular contributions in the measured signal).
+        # Instructs ACAT to bypass the ionization (fu-based) penalty that would
+        # otherwise divide this already-conservative in vivo value a second time.
+        "peff_is_measured_net": True,
     },
 
     "Metoprolol": {
@@ -313,6 +325,12 @@ REFERENCE_PK = {
         # Definitive human in vivo SPIP measurement (n=14 healthy volunteers).
         # Source: [Dahlgren et al., Mol Pharm 2016;13(9):3013 PubMed:27504798]
         "p_eff":     1.72e-4,   # [cm/s]  # Source: [Dahlgren et al., Mol Pharm 2016 PubMed:27504798 — human in vivo SPIP, n=14, DEFINITIVE]
+        # v5.2 Step 2 — p_eff is the definitive human in vivo SPIP net Peff
+        # (Dahlgren 2016; n=14 healthy volunteers). The measured signal integrates
+        # transcellular + paracellular flux, active efflux, and intracellular
+        # retention in vivo. Instructs ACAT to bypass the ionization penalty so
+        # this benchmark value is not penalised a second time.
+        "peff_is_measured_net": True,
     },
 
     "Nifedipine": {
