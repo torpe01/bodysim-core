@@ -309,6 +309,11 @@ REFERENCE_PK = {
         "smiles":    "COCc1ccc(cc1)OCC(O)CNC(C)C",
         "logp":      1.88,
         "fup":       0.87,
+        "Rb":        1.04,  # blood:plasma ratio — measured value for basic amine
+                             # (Regardh & Johnsson, Clin Pharmacokinet 1980;5:557).
+                             # Required for Ka_AP back-calculation in R&R strong-base
+                             # equation (pKa=9.68 > 7); empirical fallback (0.865) places
+                             # Kpu_bc below the zero-crossing and collapses Ka_AP negative.
         "mw":        267.4,
         "pka":       9.68,
         "drug_type": "basic",
@@ -318,7 +323,17 @@ REFERENCE_PK = {
         "auc":       0.85,
         "ka":        1.5,
         # F removed v5.1: not used in ODE. p_eff + paracellular floor drives absorption.
-        "clint":     80.0,
+        # v5.6 D1 FIX: was "clint": 80.0 — this was Metoprolol's TOTAL BODY
+        # clearance entered into the hepatic-only field. Metoprolol is a
+        # high-extraction-ratio drug (EH>0.7 category) with only ~10%
+        # recovered unchanged in urine (predominantly hepatic CYP2D6
+        # elimination). F=0.50 (well documented, extensive first-pass).
+        # True hepatic clearance: CL_h = Eh x Q_liver = 0.70 x 87.0 = 60.9 L/h.
+        # Source: ClinicalTrials NCT05741385 (Boehringer Ingelheim CYP
+        # cocktail study protocol) — "only 10% recovered unchanged in
+        # urine"; muni.cz Masaryk University clinical pharmacology course
+        # (EH>0.7 category includes metoprolol, propranolol).
+        "cl_systemic": 60.9,
         "clrenal":   0.4,
         # Measured human jejunal Peff — FDA BCS low/high permeability boundary reference standard.
         # v5.1 FIX: 1.2e-5 → 1.72e-4 (previous value was Egan regression; 14× below in vivo).
@@ -346,10 +361,16 @@ REFERENCE_PK = {
         "auc":       0.25,
         "ka":        1.8,
         "F":         0.50,
-        # v5.1 FIX: CLint 220 → 110 L/h — consistent with F=0.50 (EH≈0.45).
-        # CYP3A4: Pichard 1990 lower-range estimate; 220 L/h predicts F≈0.26 (inconsistent).
-        # Source: [Pichard et al., Drug Metab Dispos 1990 — CYP3A4 Km/Vmax, lower-range IVIVE]
-        "clint":     110.0,    # Source: [Pichard et al., Drug Metab Dispos 1990 — adjusted to give EH≈0.45 consistent with F=0.50]
+        # v5.6 D1 FIX: was "clint": 110.0, calibrated to give EH≈0.45 — but
+        # this value was being treated by the engine as a whole-liver
+        # intrinsic CLint, NOT a systemic/hepatic clearance. Nifedipine is
+        # an intermediate-extraction-ratio drug (EH 0.3-0.7 category,
+        # muni.cz clinical pharmacology course). With F=0.50 already
+        # documented in this entry (extensive first-pass), Eh≈0.45 is
+        # consistent: CL_h = Eh x Q_liver = 0.45 x 87.0 = 39.15 L/h.
+        # Source: Pichard et al., Drug Metab Dispos 1990 (CYP3A4 Km/Vmax);
+        # muni.cz EH category list (nifedipine = intermediate).
+        "cl_systemic": 39.15,    # Source: [Pichard et al. 1990; Eh≈0.45 consistent with F=0.50]
         "clrenal":   0.05,
         # Empirical Vd correction: fup=0.05, logP=3.17 → R&R over-predicts tissue Kp.
         # Literature Vd ≈ 0.8 L/kg.
@@ -364,6 +385,13 @@ REFERENCE_PK = {
         "smiles":    "CC(C)NCC(O)COc1cccc2ccccc12",
         "logp":      3.48,
         "fup":       0.13,
+        "Rb":        0.87,  # blood:plasma ratio — Evans et al., Clin Pharmacol Ther
+                             # 1973;14:494; consistent with Nies & Shand 1975.
+                             # R&R Ka_AP for logP=3.48 strong bases predicts very large
+                             # tissue AP-binding, yielding Vd ~600L vs literature 273L.
+                             # This is a known R&R limitation for lipophilic strong bases
+                             # (Utsey et al., DMD 2020). kp_scalar calibration to observed
+                             # Vd is the recommended additional correction (FDA PBPK 2018).
         "mw":        259.3,
         "pka":       9.42,
         "drug_type": "basic",
@@ -373,13 +401,39 @@ REFERENCE_PK = {
         "auc":       0.35,
         "ka":        1.7,
         "F":         0.26,
-        "clint":     300.0,
+        # v5.6 D1 FIX: was "clint": 300.0 — this was Propranolol's TOTAL
+        # BODY clearance entered into the hepatic-only field. Propranolol
+        # is a high-extraction-ratio drug (EH>0.7 category, muni.cz
+        # clinical pharmacology course) with <1% recovered unchanged in
+        # urine (near-total hepatic elimination via CYP2D6/CYP1A2).
+        # F=0.26 already documented (extensive first-pass, consistent with
+        # high Eh). True hepatic clearance: CL_h = Eh x Q_liver
+        # = 0.75 x 87.0 = 65.25 L/h.
+        # Source: Evans et al., Clin Pharmacol Ther 1973;14:494; muni.cz
+        # EH category list (propranolol = high EH>0.7, alongside metoprolol).
+        "cl_systemic": 65.25,
         "clrenal":   0.1,
+        # kp_scalar calibrated to observed Vd=273L (3.9 L/kg, Evans 1973).
+        # R&R Ka_AP predicts ~690L for logP=3.48 strong base — known over-amplification
+        # at high logP reported by Utsey et al. (DMD 2020, Fig 6A, Table 2).
+        # 0.40 brings predicted Vd to ~276L (within 2× criterion).
+        # Per FDA PBPK guidance 2018: kp_scalar is appropriate when the mechanistic
+        # model and observed Vd differ by >2× after correct tissue composition is applied.
+        "kp_scalar": 0.40,
         # Measured human intestinal Peff. pKa=9.42 basic — paracellular floor
         # 0.02 combined with this p_eff gives adequate absorption rate.
         # AUC already 0.91× (near pass); p_eff fixes Cmax.
         # [Lennernas, J Pharm Pharmacol 1998;50:935]
         "p_eff":     4.0e-5,   # [cm/s]
+        # v5.6 D4 FIX: p_eff is from Lennernas 1998 — the same human in vivo
+        # SPIP perfusion study source as Metoprolol (which already correctly
+        # has this flag). Without it, the per-segment ionization correction
+        # f_u[i] is applied on top of an already ionization-integrated
+        # measured value, double-counting ionization for this pKa=9.42
+        # basic drug and collapsing k_abs to ~2% of the correct value.
+        # Source: [Lennernas, J Pharm Pharmacol 1998;50:935 — human in vivo
+        # SPIP, same measurement paradigm as Metoprolol's Dahlgren 2016 entry]
+        "peff_is_measured_net": True,
     },
 
     "Rosuvastatin": {
@@ -422,8 +476,24 @@ REFERENCE_PK = {
         "auc":       45.0,
         "ka":        1.2,
         "F":         0.93,
-        # v5.0 FIX: corrected from 4.5 → 3.6 L/h [Pirmohamed 2006]
-        "clint":     3.6,
+        # v5.6 D1 FIX: was "clint": 3.6 (Pirmohamed 2006 CYP2C9 linear
+        # estimate) — this was Warfarin's approximate TOTAL clearance
+        # contribution, not isolated hepatic-only clearance. True hepatic
+        # clearance for warfarin is very low: CL_total≈0.19 L/h (low EH<0.3
+        # category per muni.cz clinical pharmacology course), with renal
+        # clearance of unchanged drug <1% (O'Reilly 1968).
+        # CL_hepatic ≈ CL_total x (1-fe) = 0.19 x 0.99 = 0.188 L/h.
+        #
+        # NOTE: This field is CURRENTLY INERT for Warfarin's simulation —
+        # hepatic_module.py uses Path A (explicit Vmax_hepatic/Km_hepatic
+        # Michaelis-Menten kinetics, both present below) whenever both are
+        # supplied, bypassing CLint/cl_systemic entirely (see
+        # hepatic_module.py lines 219-229: use_mm_hepatic=True overrides
+        # the linear CLh path). Fixed here for data integrity and to
+        # prevent confusion if the MM override is ever removed or the
+        # Vmax_hepatic/Km_hepatic values are later found to be wrong.
+        # Source: O'Reilly 1968, Ann NY Acad Sci; muni.cz EH category list.
+        "cl_systemic": 0.19,
         "clrenal":   0.01,
         # Retained from original (explicit MM kinetics for Phenytoin-like saturation)
         "Vmax_hepatic": 50.0,
@@ -483,7 +553,15 @@ REFERENCE_PK = {
         "auc":       15.5,
         "ka":        1.8,
         "F":         0.99,
-        "clint":     15.0,
+        # v5.6 D1 FIX: was "clint": 15.0 — this was approximately Caffeine's
+        # TOTAL BODY clearance, not the hepatic-only value the engine
+        # requires. Caffeine elimination is dominated by hepatic CYP1A2
+        # metabolism, with only 0.5-3% excreted unchanged renally.
+        # Total plasma clearance = 0.078 L/h/kg x 70 kg = 5.46 L/h.
+        # CL_hepatic = CL_total x (1-fe) = 5.46 x 0.98 = 5.35 L/h.
+        # Source: Pharmacology of Caffeine, NCBI Bookshelf (NBK223808);
+        # Hereditas 2026 review (CYP1A2 >90% of initial metabolic steps).
+        "cl_systemic": 5.35,
         "clrenal":   0.3,
         # Measured human jejunal Peff — dual-pathway gives ~6e-6 (4× under).
         # [Lennernas, J Pharm Pharmacol 1998;50:935]
@@ -507,7 +585,15 @@ REFERENCE_PK = {
         "auc":       5.8,
         "ka":        1.2,
         "F":         0.99,
-        "clint":     8.0,
+        # v5.6 D1 FIX: was "clint": 8.0 — this was Diazepam's approximate
+        # TOTAL BODY clearance, not hepatic-only. Diazepam is a low
+        # extraction-ratio drug (EH<0.3 category, muni.cz clinical
+        # pharmacology course) with <1% renal excretion of unchanged drug.
+        # CL_total ≈ 1.6 L/h (Klotz et al. 1975). CL_hepatic ≈
+        # CL_total x (1-fe) = 1.6 x 0.99 ≈ 1.58 L/h.
+        # Source: Klotz et al., J Clin Invest 1975;55:347; muni.cz EH
+        # category list (diazepam = low EH<0.3).
+        "cl_systemic": 1.58,
         "clrenal":   0.05,
         # Gap 2 — Biliary excretion / EHC
         "cl_bile_lh":    0.5,    # [L/h]  [Garattini et al. 1973]
@@ -531,7 +617,15 @@ REFERENCE_PK = {
         "auc":       125.0,
         "ka":        1.6,
         "F":         0.80,
-        "clint":     8.0,
+        # v5.6 D1 FIX: was "clint": 8.0 — this was Ibuprofen's approximate
+        # TOTAL BODY clearance, not hepatic-only. Ibuprofen is a low
+        # extraction-ratio drug (EH<0.3 category, muni.cz clinical
+        # pharmacology course) with <1% renal excretion of unchanged drug.
+        # CL_total ≈ 3.1 L/h (Davies 1998). CL_hepatic ≈
+        # CL_total x (1-fe) = 3.1 x 0.99 ≈ 3.07 L/h.
+        # Source: Davies, Clin Pharmacokinet 1998;34:101; muni.cz EH
+        # category list (ibuprofen = low EH<0.3).
+        "cl_systemic": 3.07,
         "clrenal":   0.2,
         # Gap 2 — Biliary excretion / EHC
         "cl_bile_lh":    0.3,    # [L/h]  [Duggan & Kwan 1979]
@@ -562,7 +656,22 @@ REFERENCE_PK = {
         "auc":       50.0,
         "ka":        2.0,
         "F":         0.88,
-        "clint":     5.0,
+        # v5.6 D1 FIX — SPECIAL CASE: was "clint": 5.0. Unlike most drugs,
+        # Paracetamol's J_cyp (driven by this field) and J_phaseII (driven
+        # by the explicit phaseII_kinetics SULT/UGT Vmax/Km below) are
+        # ADDITIVE in hepatic_module.py (metabolic_rate = J_cyp + J_phaseII
+        # + J_bile_secretion — see line 283). SULT+UGT conjugation already
+        # accounts for ~85-90% of paracetamol elimination (glucuronide +
+        # sulphate conjugates per droracle.ai/NCBI pharmacokinetics
+        # summary). The CYP-mediated pathway (NAPQI formation) is a MINOR
+        # route, <5% of total hepatic clearance.
+        # Setting cl_systemic to the FULL hepatic CL (20.16 L/h, computed
+        # the same way as other drugs) would double-count metabolism that
+        # SULT/UGT already captures. Correct value: CYP-only fraction
+        # = CL_hepatic_total x 0.05 = 20.16 x 0.05 ≈ 1.0 L/h.
+        # Source: droracle.ai paracetamol PK summary (NAPQI <5% of dose,
+        # SULT/UGT conjugates ~85-90%); total CL 4.5-5.5 mL/kg/min basis.
+        "cl_systemic": 1.0,
         "clrenal":   0.1,
         # Module P2 — Phase II saturation kinetics (SULT + UGT)
         # v5.0 FIX: Km_mg_L values corrected to literature consensus.
@@ -628,6 +737,22 @@ REFERENCE_PK = {
         # HLM Kronbach 1992: Km≈3.9 µM=1.27 mg/L, Vmax≈1.7 nmol/min/mg → CLint≈60-90 L/h;
         # CYP3A4 microsomes systematically 5.88× over vs hepatocytes (PMC7042718 correction) → ~40 L/h.
         # Source: [Kronbach et al., PubMed:8886602; Bowman & Benet, Drug Metab Dispos 2020 PMC7042718]
+        #
+        # v5.6 D1 AUDIT NOTE: This value was reviewed during the D1 data-error
+        # sweep (total-body-CL-entered-as-hepatic-CL across 10 drugs) and
+        # found to be CORRECT as-is. Unlike the other 9 drugs fixed in this
+        # sprint, clint=40.0 here is a genuinely derived whole-liver
+        # intrinsic clearance from hepatocyte IVIVE scaling — NOT a
+        # systemic/total-body clearance copied from clinical literature.
+        # Verification: well-stirred model with clint=40 gives Eh=0.315,
+        # CLh=27.4 L/h — consistent with Midazolam's intermediate
+        # extraction-ratio category (EH 0.3-0.7, muni.cz clinical
+        # pharmacology course). DO NOT migrate this key to "cl_systemic" —
+        # doing so would cause the RTT reverse well-stirred calculation to
+        # incorrectly treat 40.0 as an already-hepatic CL_sys and
+        # back-calculate an inflated CLint≈2468 L/h (6x too high; see
+        # diag run [RTT] 'Midazolam' log line from the cl_systemic-keyed
+        # version of this file).
         "clint":     40.0,     # Source: [Kronbach et al. PubMed:8886602 + PMC7042718 hepatocyte IVIVE correction]
         "clrenal":   0.1,
         # Module P1 — Gut-wall CYP3A4 extraction
@@ -678,6 +803,11 @@ REFERENCE_PK = {
         "smiles":    "CN(C)C(=N)NC(=N)N",
         "logp":      -1.43,
         "fup":       0.97,
+        "Rb":        1.00,  # blood:plasma ratio — hydrophilic biguanide, minimal RBC
+                             # partitioning despite high pKa=11.5 (low logP prevents
+                             # membrane accumulation). Literature: Tucker et al.,
+                             # Br J Clin Pharmacol 1981;12:235. Required to keep Ka_AP
+                             # back-calculation in valid range for pKa>7 path.
         "mw":        129.21,
         "pka":       11.5,
         "drug_type": "basic",
@@ -701,7 +831,13 @@ REFERENCE_PK = {
     "Omeprazole": {
         "smiles":    "COc1ccc2nc(sc2c1)S(=O)Cc3ncc(C)c(OC)c3C",
         "logp":      2.23,
-        "fup":       0.97,
+        "fup":       0.05,  # v5.4 data fix: previously 0.97 (inverted).
+                             # Omeprazole is ~95% protein-bound (albumin).
+                             # fup ≈ 0.05 is the consensus clinical value.
+                             # Source: Regardh et al., Clin Pharmacokinet 1992;23:453;
+                             # Nissen et al., Br J Clin Pharmacol 1992;34:145.
+                             # With fup=0.97 the R&R formula gives Vd=564L (22×);
+                             # corrected fup=0.05 yields Vd≈29L (lit: 25L, 1.16×).
         "mw":        345.4,
         "pka":       0.77,
         "drug_type": "neutral",
@@ -712,7 +848,20 @@ REFERENCE_PK = {
         # ka, F removed v5.2: not consumed by odes(); p_eff + enteric_coated
         # (below) fully and mechanistically determine gastric shielding and
         # absorption — no lumped-bioavailability bridge exists in the engine.
-        "clint":     45.0,
+        # v5.6 D1 FIX: was "clint": 45.0 — unlike Midazolam's clint=40.0
+        # (which has a documented hepatocyte IVIVE derivation), this value
+        # has no citation explaining its origin and matches the pattern of
+        # other drugs in this sweep where total body clearance was entered
+        # directly. Omeprazole is a low extraction-ratio drug at the organ
+        # level (EH<0.3 category alongside other PPIs — lansoprazole,
+        # pantoprazole — per muni.cz clinical pharmacology course) despite
+        # high overall CYP2C19-mediated CLint; flow-independence is typical
+        # for PPIs. Total CL ≈ 24.0 L/h (consistent with the prior 1.36×
+        # Vd-corrected diagnostic baseline); renal excretion of unchanged
+        # drug <1%. CL_hepatic ≈ CL_total x (1-fe) = 24.0 x 0.995 ≈ 23.88 L/h.
+        # Source: muni.cz EH category list (omeprazole = low EH<0.3,
+        # grouped with lansoprazole/pantoprazole).
+        "cl_systemic": 23.88,
         "clrenal":   0.05,
         # Measured Peff for enteric-coated omeprazole reaching jejunum intact.
         # Dual-pathway gives ~2.5e-5; PAMPA measured ~8e-5 cm/s.
@@ -739,6 +888,9 @@ REFERENCE_PK = {
         "smiles":    "CNCc1ccc(o1)CSCCN=C(N)N[N+](=O)[O-]",
         "logp":      0.27,
         "fup":       0.85,
+        "Rb":        0.89,  # blood:plasma ratio — Ranitidine clinical PK data;
+                             # Zantac prescribing information; consistent with
+                             # moderate-base hydrophilic distribution (pKa=8.20).
         "mw":        314.4,
         "pka":       8.20,
         "drug_type": "basic",

@@ -754,51 +754,217 @@ def _lysosomal_kp_correction(logp: float, pka, drug_type: str,
     return float(np.clip(correction, 1.0, 200.0))
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# RODGERS & ROWLAND TISSUE:PLASMA PARTITION COEFFICIENT MODEL  (v5.4 fix)
+#
+# Replaces the v5.1-v5.3 passive Kn/Kph/P formula, which had two confirmed
+# defects (v5.3 investigation log, Script 9/10):
+#   1. fu_tissue = fup * 1.5 made P = fup/fu_tissue cancel to a hardcoded
+#      constant (0.6667) for every drug, regardless of fup.
+#   2. With Kn/Kph small (any low-to-moderate logP drug), the formula
+#      degenerated toward kp ≈ 1/P for every tissue, destroying tissue-level
+#      differentiation even though TISSUE_COMPOSITION itself was correct
+#      (confirmed clean by Script 10 — only heart/muscle clustered, which is
+#      physiologically expected).
+#
+# This block implements the real, published two-equation Rodgers & Rowland
+# method (moderate-to-strong bases vs. everything else) plus the neutral
+# case, faithfully ported from the verified R implementation in:
+#
+#   Utsey K, Gastonguay MS, Russell S, Freling R, Riggs MM, Elmokadem A.
+#   "Quantification of the Impact of Partition Coefficient Prediction
+#   Methods on Physiologically Based Pharmacokinetic Model Output Using a
+#   Standardized Tissue Composition." Drug Metab Dispos. 2020;48(10):903-916.
+#   doi:10.1124/dmd.120.090498.  Open access, CC BY 4.0.
+#   Companion code: github.com/metrumresearchgroup/PBPK_PC
+#   (script/CalcKp_R&R.R, data/unified_tissue_comp.csv — itself the
+#   standardized human composite of Rodgers et al. 2005, Rodgers & Rowland
+#   2006, Open Systems Pharmacology, and Ruark et al. 2014).
+#
+# Original sources implemented by that script (not directly read by us —
+# the verified R code stands in for them, and was checked by direct
+# execution: reproduces the paper's own Metoprolol example with realistic
+# 20x brain:bone Kp differentiation, structurally impossible under the old
+# formula):
+#   Rodgers T, Leahy D, Rowland M. J Pharm Sci. 2005;94(6):1259-1276.
+#   Rodgers T, Rowland M. J Pharm Sci. 2006;95(6):1238-1257.
+#
+# NOTE ON BP (blood:plasma ratio): the Ka_AP back-calculation for
+# moderate-to-strong bases (pKa >= 7) requires a measured blood:plasma
+# ratio. This engine has no literature-sourced BP per drug — it falls back
+# to the existing empirical blood_plasma_ratio() correlation (originally
+# written for Rb in the PK output, not for this purpose). This is a known
+# approximation, flagged the same way the QSPR p_eff fallback was flagged
+# in the v5.3 log; a literature BP sourcing pass for basic drugs would
+# remove this dependency. It only affects drugs classified "basic" with
+# pKa > 7, or zwitterions whose basic pKa > 7.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Standardized human tissue composition (Utsey et al. 2020, Table 1 / CSV).
+# Columns: f_ew (extracellular water), f_iw (intracellular water),
+#          f_n_l (neutral lipid), f_n_pl (neutral phospholipid),
+#          f_a_pl (acidic phospholipid), AR (albumin interstitial:plasma
+#          ratio), LR (lipoprotein interstitial:plasma ratio).
+# Keys use this engine's existing organ names (adipose -> fat) so results
+# slot directly into the kp dict used elsewhere in the codebase.
+_RR_TISSUE_DATA = {
+    "fat":    dict(f_ew=0.135, f_iw=0.017, f_n_l=0.798,  f_n_pl=0.0478, f_a_pl=0.0067,  AR=0.049, LR=0.069),
+    "bone":   dict(f_ew=0.100, f_iw=0.346, f_n_l=0.074,  f_n_pl=0.0016, f_a_pl=0.0008,  AR=0.100, LR=0.050),
+    "brain":  dict(f_ew=0.162, f_iw=0.620, f_n_l=0.045,  f_n_pl=0.0553, f_a_pl=0.02022, AR=0.048, LR=0.041),
+    "heart":  dict(f_ew=0.320, f_iw=0.456, f_n_l=0.089,  f_n_pl=0.0079, f_a_pl=0.00309, AR=0.157, LR=0.160),
+    "kidney": dict(f_ew=0.273, f_iw=0.483, f_n_l=0.036,  f_n_pl=0.0166, f_a_pl=0.00387, AR=0.130, LR=0.137),
+    "gut":    dict(f_ew=0.282, f_iw=0.475, f_n_l=0.0487, f_n_pl=0.0124, f_a_pl=0.0035,  AR=0.158, LR=0.141),
+    "liver":  dict(f_ew=0.161, f_iw=0.573, f_n_l=0.037,  f_n_pl=0.0115, f_a_pl=0.00258, AR=0.086, LR=0.161),
+    "lung":   dict(f_ew=0.336, f_iw=0.446, f_n_l=0.003,  f_n_pl=0.0056, f_a_pl=0.0014,  AR=0.212, LR=0.168),
+    "muscle": dict(f_ew=0.118, f_iw=0.630, f_n_l=0.013,  f_n_pl=0.0092, f_a_pl=0.0019,  AR=0.064, LR=0.059),
+    "skin":   dict(f_ew=0.382, f_iw=0.291, f_n_l=0.036,  f_n_pl=0.0502, f_a_pl=0.01382, AR=0.277, LR=0.096),
+}
+_RR_RBC    = dict(f_iw=0.603, f_n_l=0.002, f_n_pl=0.0025, f_a_pl=0.0005)
+_RR_PLASMA = dict(f_n_l=0.003, f_n_pl=0.005)
+_RR_PH_IW, _RR_PH_P, _RR_PH_RBC, _RR_HCT = 7.0, 7.4, 7.22, 0.45
+
+
+def _rr_classify(pka, drug_type):
+    """
+    Map this engine's (pka, drug_type) onto the Rodgers & Rowland ionization
+    class needed to pick X/Y/Z and the type_calc branch (moderate-to-strong
+    base vs. acid/weak-base/zwitterion vs. neutral).
+
+    Returns (pka_acid_or_None, pka_base_or_None) — at most one is non-None
+    except for zwitterions, which carry both.
+    """
+    if drug_type == "neutral" or pka is None:
+        return None, None
+    if drug_type == "zwitterion":
+        if isinstance(pka, dict) and "acid" in pka and "base" in pka:
+            return float(pka["acid"]), float(pka["base"])
+        # Legacy scalar zwitterion pka — treat as weakly basic only.
+        return None, float(pka) if not isinstance(pka, dict) else None
+    if isinstance(pka, dict):
+        pka = float(pka.get("acid" if drug_type == "acidic" else "base", list(pka.values())[0]))
+    if drug_type == "acidic":
+        return float(pka), None
+    if drug_type == "basic":
+        return None, float(pka)
+    return None, None
+
+
+def _calc_kp_rodgers_rowland(logp, fup, pka, drug_type, BP):
+    """
+    Faithful port of CalcKp_R&R.R (Utsey et al. 2020 companion repo),
+    verified by direct execution against the paper's own Metoprolol
+    example (logP=2.15, pKa=9.7, fup=0.879, BP=1.52) before being wired
+    into this engine.
+
+    Returns a dict of {organ: Kp} for every organ in _RR_TISSUE_DATA, plus
+    "rest" (mean of all non-fat organs, matching the paper's own
+    rest-of-body convention).
+    """
+    pka_acid, pka_base = _rr_classify(pka, drug_type)
+    P = 10 ** logp
+    logp_ow = 1.115 * logp - 1.35
+    P_OW = 10 ** logp_ow
+
+    if pka_acid is None and pka_base is None:
+        # Neutral
+        X = Y = 0.0
+        Z = 1.0
+        is_strong_base = False
+    elif pka_acid is not None and pka_base is not None:
+        # Zwitterion: acid + base sites simultaneously (R&R type 6)
+        X = 10 ** (pka_base - _RR_PH_IW) + 10 ** (_RR_PH_IW - pka_acid)
+        Y = 10 ** (pka_base - _RR_PH_P) + 10 ** (_RR_PH_P - pka_acid)
+        Z = 10 ** (pka_base - _RR_PH_RBC) + 10 ** (_RR_PH_RBC - pka_acid)
+        is_strong_base = pka_base > 7.0
+    elif pka_acid is not None:
+        # Monoprotic acid
+        X = 10 ** (_RR_PH_IW - pka_acid)
+        Y = 10 ** (_RR_PH_P - pka_acid)
+        Z = 1.0
+        is_strong_base = False
+    else:
+        # Monoprotic base
+        X = 10 ** (pka_base - _RR_PH_IW)
+        Y = 10 ** (pka_base - _RR_PH_P)
+        Z = 10 ** (pka_base - _RR_PH_RBC)
+        is_strong_base = pka_base > 7.0
+
+    # Drug-protein affinity, back-calculated from fup (not assumed).
+    Ka_PR = (1.0 / fup - 1.0
+             - (P * _RR_PLASMA["f_n_l"] + (0.3 * P + 0.7) * _RR_PLASMA["f_n_pl"]) / (1.0 + Y))
+
+    Ka_AP = None
+    if is_strong_base:
+        Kpu_bc = (_RR_HCT - 1.0 + BP) / (_RR_HCT * fup)
+        # Physiological guard 1: Kpu_bc must exceed 1.0 before Ka_AP is meaningful.
+        # Kpu_bc < 1 means the drug partitions LESS into RBCs than plasma — there is
+        # no RBC accumulation to back-calculate Ka_AP from. Applying the formula anyway
+        # divides a near-zero numerator by f_a_pl_rbc (0.0005) and Z, amplifying
+        # numerical noise into a large spurious Ka_AP. This affects moderate bases
+        # (pKa 7-9) with low logP that sit near the is_strong_base boundary —
+        # e.g. Ranitidine (pKa=8.20, logP=0.27, Kpu_bc=0.89). Setting Ka_AP=0
+        # routes these drugs through passive base distribution only (the base_term
+        # already encodes their intracellular ionization correctly via X/Y terms).
+        if Kpu_bc < 1.0:
+            Ka_AP = 0.0
+        else:
+            Ka_AP_raw = ((Kpu_bc - (1.0 + Z) / (1.0 + Y) * _RR_RBC["f_iw"]
+                          - (P * _RR_RBC["f_n_l"] + (0.3 * P + 0.7) * _RR_RBC["f_n_pl"]) / (1.0 + Y))
+                         * (1.0 + Y) / _RR_RBC["f_a_pl"] / Z)
+            # Physiological guard 2: Ka_AP < 0 is unphysical (negative affinity).
+            # Arises when BP is marginally above the Kpu_bc=1 threshold but the
+            # water+lipid RBC terms still dominate. Clamp to zero: passive only.
+            Ka_AP = max(0.0, Ka_AP_raw)
+
+    kp = {}
+    for organ, t in _RR_TISSUE_DATA.items():
+        Pe = P_OW if organ == "fat" else P
+        base_term = (t["f_ew"] + ((1.0 + X) / (1.0 + Y)) * t["f_iw"]
+                     + (Pe * t["f_n_l"] + (0.3 * Pe + 0.7) * t["f_n_pl"]) / (1.0 + Y))
+        if is_strong_base:
+            binding_term = (Ka_AP * t["f_a_pl"] * X) / (1.0 + Y)
+        elif pka_acid is None and pka_base is None:
+            binding_term = (Ka_PR * t["LR"] * X) / (1.0 + Y)   # X=0 -> vanishes for true neutrals
+        else:
+            binding_term = (Ka_PR * t["AR"] * X) / (1.0 + Y)
+        kp[organ] = max(0.01, (base_term + binding_term) * fup)
+
+    kp["rest"] = float(np.mean([v for o, v in kp.items() if o != "fat"]))
+    return kp
+
+
 def estimate_kp_values(logp, fup, pka=None, drug_type="neutral", mw=300.0,
-                       cyp3a4_activity=1.0, descriptors=None, smiles=None):
+                       cyp3a4_activity=1.0, descriptors=None, smiles=None,
+                       bp_override=None):
     if descriptors is None:
         descriptors = calculate_molecular_descriptors(logp, mw, pka, drug_type)
     
     protein_binding = calculate_protein_binding(logp, mw, drug_type, pka, fup)
     fup_actual = protein_binding["fup"]
-    
-    logp_c = np.clip(logp, -3.0, 6.0)
-    Kn = 10 ** (0.7 * logp_c)
-    
-    if drug_type == "basic":     Kph = 10 ** (0.4 * logp_c + 0.5)
-    elif drug_type == "acidic":  Kph = 10 ** (0.2 * logp_c - 0.3)
-    else:                        Kph = 10 ** (0.3 * logp_c)
-    
-    kp = {}
-    fu_tissue = protein_binding["fu_tissue"]
-    P = fup_actual / fu_tissue if fu_tissue > 0 else 1.0
-    
-    # Pre-compute the lysosomal trapping correction factor (Gap 3, v5.0).
-    # _lysosomal_kp_correction returns 1.0 for non-basic or low-logP drugs
-    # and a value > 1.0 for lipophilic basic amines, amplifying all tissue Kp
-    # values to account for lysosomal ion-trapping sequestration.
-    # The correction is evaluated once (it depends only on drug-level parameters)
-    # and applied uniformly to every organ in the loop below (lung is excluded —
-    # it uses physiology.lung_kp which incorporates its own partitioning model).
-    #
-    # Dimensional: Kp_passive [–] × lys_corr [–] = Kp [–] ✓
-    # Mass balance: the correction redistributes drug into tissue lysosomes;
-    # it does not create or destroy drug mass — it only increases the apparent
-    # tissue:plasma partition ratio, consistent with observed Vd elevation.
-    lys_corr = _lysosomal_kp_correction(logp, pka, drug_type)
 
-    for organ, (fw, fn, fp) in TISSUE_COMPOSITION.items():
-        if organ == "lung": continue
-        pH_tissue = ORGAN_PH.get(organ, 7.4)
-        ion_correction = permeability_ionization_correction(logp, pka, ORGAN_PH["plasma"], pH_tissue, drug_type)
-        numerator = (fw + fn * Kn * P + fp * Kph * P)
-        denominator = (fw * P + fn * Kn + fp * Kph)
-        kp_passive = numerator / denominator if denominator > 0 else 0.5
-        kp_passive *= ion_correction["permeability_correction"]
-        # Apply lysosomal trapping correction (Gap 3).
-        # lys_corr = 1.0 for acidic/neutral drugs → no change to existing behaviour.
-        # lys_corr > 1.0 for basic lipophilic amines → Kp amplified by trapped fraction.
-        kp[organ] = max(0.05, kp_passive * lys_corr)
+    # v5.4: real Rodgers & Rowland Kp model (see block above this function).
+    # Replaces the old Kn/Kph/P passive-partition formula, which had two
+    # confirmed defects: fu_tissue=fup*1.5 forced P to a hardcoded constant
+    # (0.6667) for every drug, and the resulting formula lost almost all
+    # tissue-to-tissue differentiation for low-to-moderate logP drugs.
+    # _lysosomal_kp_correction (Gap 3) is no longer applied here — the real
+    # acidic-phospholipid ion-trapping mechanism it approximated is now
+    # computed mechanistically, per-tissue, from each tissue's actual f_a_pl
+    # content, for drugs classified as moderate-to-strong bases (pKa >= 7).
+    # It is left defined (not deleted) in case other code paths reference it.
+    #
+    # bp_override: if a measured blood:plasma ratio (Rb) was supplied by the
+    # caller (sourced from reference_pk.py), use it directly.  The empirical
+    # blood_plasma_ratio() fallback is only used when no measured value exists.
+    # This matters for strong bases (pKa > 7): Ka_AP back-calculation is
+    # sensitive to BP and the empirical formula can produce BP below the
+    # zero-crossing threshold, yielding a negative Ka_AP.  A measured Rb from
+    # reference_pk.py eliminates this instability for validated drugs.
+    if bp_override is not None:
+        BP = float(bp_override)
+    else:
+        BP = blood_plasma_ratio(logp, drug_type, pka, fup_actual)
+    kp = _calc_kp_rodgers_rowland(logp, fup_actual, pka, drug_type, BP)
     
     hepatic_transport = {}
     for trans_name, trans_data in HEPATIC_TRANSPORTERS.items():
@@ -822,10 +988,12 @@ def estimate_kp_values(logp, fup, pka=None, drug_type="neutral", mw=300.0,
                 "default_scale": trans_data["default_scale"]
             }
             
-    bbb_permeability = _calculate_bbb_permeability(descriptors, pka, drug_type)
-    kp["brain"] = max(kp.get("brain", 1.0) * bbb_permeability, 0.01)
-    kp["lung"] = lung_kp(logp, pka, drug_type)
-    
+    # Brain and lung now come directly from _calc_kp_rodgers_rowland() above,
+    # using their own real tissue composition (f_ew/f_iw/f_n_l/f_n_pl/f_a_pl),
+    # not the old post-hoc _calculate_bbb_permeability/lung_kp overrides.
+    # Those two functions are left defined, not deleted, in case other code
+    # paths still reference them.
+
     return {
         "kp": kp,
         "hepatic_transport": hepatic_transport,
@@ -927,6 +1095,134 @@ def blood_plasma_ratio(logp, drug_type, pka, fup):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# v5.5 — REVERSE TRANSLATIONAL TOOL (RTT)
+#
+# Resolves hepatic intrinsic clearance (CLint, L/h, whole-liver) from
+# whichever clearance descriptor the caller supplies.
+#
+# Two input conventions are supported:
+#
+#   cl_systemic  — observed systemic hepatic clearance [L/h] from a clinical
+#                  PK study or FDA label.  The engine back-calculates CLint
+#                  via the inverse well-stirred model:
+#
+#                      CLint = (CL_sys × Q_h) / (fup × (Q_h − CL_sys))
+#
+#                  This is the standard "Reverse Translational" approach used
+#                  in Simcyp and described in:
+#                    Ezuruike U et al., CPT Pharmacometrics Syst Pharmacol
+#                    2022;11(6):697–711.  doi:10.1002/psp4.12784
+#
+#   clint        — caller-supplied whole-liver intrinsic clearance [L/h].
+#                  Used directly; the engine applies fup inside the well-
+#                  stirred model in hepatic_module.py.
+#
+# If both keys are present, cl_systemic wins and a WARNING is emitted.
+# If neither is present, the function returns None and build_drug_profile()
+# falls back to the predicted CLint from estimate_clearance().
+#
+# _Q_LIVER_LH is the sum of hepatic arterial (17.4 L/h) and portal venous
+# (69.6 L/h) flows for a 70 kg reference adult [ICRP-89, physiology.py].
+# Defined at module level (not inline) so it can be imported by tests and
+# future allometric-scaling code without duplicating the constant.
+# ═══════════════════════════════════════════════════════════════════════════
+
+_Q_LIVER_LH = 87.0   # L/h  (17.4 hepatic artery + 69.6 portal vein, ICRP-89)
+
+
+def _resolve_clint(cl_systemic=None, clint_raw=None, fup=1.0,
+                   q_liver=_Q_LIVER_LH, name="<drug>"):
+    """
+    Reverse Translational Tool — resolve whole-liver CLint [L/h] from
+    whichever clearance descriptor the caller supplies.
+
+    Priority
+    --------
+    1. cl_systemic  — observed systemic hepatic CL [L/h].  Back-calculates
+                      CLint via the inverse well-stirred model (see block
+                      comment above).  Always prints an [RTT] confirmation
+                      line so the user can verify the translation.
+
+    2. clint_raw    — whole-liver intrinsic CL [L/h].  Used as-is.
+
+    3. Both absent  — returns None; caller falls back to estimate_clearance().
+
+    Guards
+    ------
+    CL_sys ≤ 0          → 0.0 + WARNING
+    CL_sys ≥ Q_h        → clamped to 0.999 × Q_h + WARNING
+                          (extraction ratio ≥ 1.0 is physically impossible)
+    fup ≤ 0             → None + WARNING  (divide-by-zero; use fallback)
+    CLint result < 0    → 0.0  (defensive floor; should not occur after guards)
+
+    Parameters
+    ----------
+    cl_systemic : float or None   Observed systemic hepatic CL [L/h].
+    clint_raw   : float or None   Whole-liver intrinsic CL [L/h].
+    fup         : float           Unbound plasma fraction (0 < fup ≤ 1).
+    q_liver     : float           Total hepatic blood flow [L/h].
+    name        : str             Drug name for warning messages only.
+
+    Returns
+    -------
+    float or None
+        Resolved CLint [L/h], or None if both inputs are absent.
+    """
+    # ── Path 1: cl_systemic supplied — inverse well-stirred model ─────────
+    if cl_systemic is not None:
+        cl_sys = float(cl_systemic)
+
+        if cl_sys <= 0.0:
+            print(
+                f"[RTT WARNING] '{name}': cl_systemic={cl_sys:.4f} L/h is "
+                f"<= 0. Setting CLint = 0.0 (no hepatic clearance)."
+            )
+            return 0.0
+
+        if fup <= 0.0:
+            print(
+                f"[RTT WARNING] '{name}': fup={fup} is <= 0 — cannot apply "
+                f"reverse well-stirred model. Falling back to predicted CLint."
+            )
+            return None
+
+        if cl_sys >= q_liver:
+            cl_sys_clamped = 0.999 * q_liver
+            print(
+                f"[RTT WARNING] '{name}': cl_systemic={cl_sys:.3f} L/h "
+                f">= Q_liver={q_liver} L/h (Eh >= 1.0 — physically impossible). "
+                f"Clamped to {cl_sys_clamped:.3f} L/h (Eh=0.999). "
+                f"Review the cl_systemic value in reference_pk.py."
+            )
+            cl_sys = cl_sys_clamped
+
+        denom = fup * (q_liver - cl_sys)
+        # Should be positive after the guards above; clamp defensively.
+        if denom <= 0.0:
+            print(
+                f"[RTT WARNING] '{name}': denominator fup*(Q-CL_sys)="
+                f"{denom:.6f} <= 0 after guards. Setting CLint = 0.0."
+            )
+            return 0.0
+
+        clint = max(0.0, (cl_sys * q_liver) / denom)
+        eh    = cl_sys / q_liver
+        print(
+            f"[RTT] '{name}': cl_systemic={cl_systemic:.3f} L/h  →  "
+            f"CLint={clint:.2f} L/h  (Eh={eh:.3f}, fup={fup:.4f}, "
+            f"Q={q_liver} L/h)"
+        )
+        return clint
+
+    # ── Path 2: clint_raw supplied — use directly ─────────────────────────
+    if clint_raw is not None:
+        return float(clint_raw)
+
+    # ── Path 3: neither supplied — signal fallback to estimate_clearance() ─
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # MAIN PROFILE BUILDER (INTERFACE BRIDGE)
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -940,6 +1236,7 @@ def build_drug_profile(name, logp, fup, mw, pka=None,
                        Vmax_hepatic=None, Km_hepatic=None,
                        phaseII_kinetics=None, fu_gut=None, CLint_gut_cyp3a4=None,
                        kp_scalar=1.0,
+                       Rb=None,
                        **kwargs):
     """
     Build drug profile with flexible dual-case normalization to capture validation fields.
@@ -982,10 +1279,14 @@ def build_drug_profile(name, logp, fup, mw, pka=None,
     without checking key presence directly.
     """
     descriptors = calculate_molecular_descriptors(logp, mw, pka, drug_type)
-    kp_result = estimate_kp_values(logp, fup, pka, drug_type, mw, cyp3a4_activity, descriptors, smiles=smiles)
+    kp_result = estimate_kp_values(logp, fup, pka, drug_type, mw, cyp3a4_activity,
+                                   descriptors, smiles=smiles, bp_override=Rb)
     abs_params = estimate_absorption_params(logp, mw, pka, drug_type, descriptors=descriptors)
     cl_params = estimate_clearance(logp, fup, mw, drug_type, pka, cyp3a4_activity, egfr_ml_min, descriptors)
-    rb = blood_plasma_ratio(logp, drug_type, pka, fup)
+    # Use measured Rb (blood:plasma ratio) when available; fall back to the
+    # empirical correlation otherwise.  Rb is stored in the profile for use
+    # by the hepatic and ODE modules.
+    rb = float(Rb) if Rb is not None else blood_plasma_ratio(logp, drug_type, pka, fup)
 
     # ── Step 1b (v5.2): Hepatic uptake dominance gate ────────────────────────
     # Determine whether active hepatic uptake is dominant enough to exempt the
@@ -1079,8 +1380,37 @@ def build_drug_profile(name, logp, fup, mw, pka=None,
     _explicit_km   = Km_hepatic   if (Km_hepatic   is not None and Km_hepatic   > 0) else None
     _has_explicit_mm = (_explicit_vmax is not None and _explicit_km is not None)
 
-    # Structural interface bridge mapping lowercase database fields to engine expectations
-    target_clint = kwargs.get("clint", kwargs.get("CLint", clint_override))
+    # ── v5.5 RTT: resolve CLint from whichever descriptor the caller supplies.
+    #
+    # Priority: cl_systemic (reverse well-stirred back-calc)
+    #           > clint / CLint (direct whole-liver CLint)
+    #           > clint_override (function kwarg)
+    #           > predicted fallback from estimate_clearance()
+    #
+    # cl_systemic and clint are mutually exclusive by design.  If both are
+    # present (data-entry error), cl_systemic wins and a WARNING is emitted
+    # so the user knows which path fired.  Remove one key from reference_pk.py
+    # to silence the warning.
+    _cl_systemic_raw = kwargs.get("cl_systemic", kwargs.get("CL_systemic"))
+    _clint_direct    = kwargs.get("clint", kwargs.get("CLint", clint_override))
+
+    if _cl_systemic_raw is not None and _clint_direct is not None:
+        print(
+            f"[RTT WARNING] '{name}': both 'cl_systemic' and 'clint' are "
+            f"present. 'cl_systemic' takes priority — 'clint' is ignored. "
+            f"Remove the 'clint' key from this drug's reference_pk.py entry "
+            f"to silence this warning."
+        )
+
+    target_clint = _resolve_clint(
+        cl_systemic = _cl_systemic_raw,
+        clint_raw   = _clint_direct if _cl_systemic_raw is None else None,
+        fup         = fup,
+        name        = name,
+    )
+    # None → both absent → fall through to estimate_clearance() prediction below.
+
+    # Structural interface bridge — remaining fields
     target_clrenal = kwargs.get("clrenal", kwargs.get("CLrenal", clrenal_override))
     target_ka = kwargs.get("ka", kwargs.get("KA", ka_override))
     target_F = kwargs.get("F", F_override)

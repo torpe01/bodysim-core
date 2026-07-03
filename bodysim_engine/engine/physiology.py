@@ -44,6 +44,26 @@ ORGAN_VOLUMES = {
     "skin":           7.8,
     "bone":          10.5,
     "rest":           5.5,
+    # ── v5.6 T22 FIX: explicit volumes for spleen, adipose_mes, pancreas ──
+    # Previously these three ODE compartments used hardcoded fallback values
+    # inside odes() (0.2, 0.5, 0.1 L) that were never allometrically scaled —
+    # a 120 kg patient used the same volumes as a 50 kg patient.
+    # Correct ICRP-89 (Publication 89, 2002, Table 2.8) reference values
+    # for a 70 kg reference adult male:
+    #   Spleen:           0.150 L   (ICRP-89 Table 2.8)
+    #   Pancreas:         0.140 L   (ICRP-89 Table 2.8)
+    #   Adipose_mes:      0.500 L   (mesenteric adipose ≈ 3.4% of fat volume;
+    #                                14.5 L × 0.034 ≈ 0.49 L — rounded to 0.50 L
+    #                                Pond & Torok-Storb 1994, Obes Res)
+    # These are now included in ORGAN_VOLUMES so scale_physiology() applies
+    # the standard bw_ratio^0.75 allometric scaling automatically.
+    # The "rest" volume (5.5 L) previously lumped all three — it is retained
+    # unchanged so total body volume is consistent (rest now represents all
+    # remaining unlisted tissues).
+    # Sources: ICRP Publication 89 (2002); Pond & Torok-Storb (1994).
+    "spleen":       0.150,
+    "adipose_mes":  0.500,
+    "pancreas":     0.140,
 }
 
 # Organ blood flows (L/h) — ICRP-89 Table 2.8

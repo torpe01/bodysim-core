@@ -306,7 +306,8 @@ class ACATAbsorptionModule:
                          "A_glu_eff"     [mg]   P-gp efflux depot
                          "M_lumen"       array  luminal segment masses [mg]
                          "A_bile"        [mg]   bile pool mass
-                         "ka_reabs"      [h⁻¹]  re-absorption rate from efflux depot
+                         "J_glu_eff_to_lumen" [mg/h]  P-gp efflux mass routed to pgp_target_segment
+                         "pgp_target_segment" [int]   lumen segment index receiving effluxed mass
                          "LUMEN_BASE"    int    first lumen index in y
                          "BILE_IDX"      int    bile pool index in y
 
@@ -324,18 +325,34 @@ class ACATAbsorptionModule:
         kt_arr   = ac["kt"]
         k_abs_arr= ac["k_abs"]
 
-        A_dose_depot = ph_profiles["A_dose_depot"]
-        A_glu_eff    = ph_profiles["A_glu_eff"]
-        M_lumen      = ph_profiles["M_lumen"]
-        A_bile       = ph_profiles["A_bile"]
-        ka_reabs     = ph_profiles["ka_reabs"]
+        A_dose_depot       = ph_profiles["A_dose_depot"]
+        A_glu_eff          = ph_profiles["A_glu_eff"]
+        M_lumen            = ph_profiles["M_lumen"]
+        A_bile             = ph_profiles["A_bile"]
+        # ka_reabs removed — P-gp efflux no longer recycles to enterocyte.
+        # J_glu_eff_to_lumen carries effluxed mass to the dynamically selected
+        # target lumen segment (pgp_target_segment). See pbpk_model.py GLU_EFF block.
+        J_glu_eff_to_lumen = ph_profiles.get("J_glu_eff_to_lumen", 0.0)
+        pgp_target_segment = ph_profiles.get("pgp_target_segment", 4)
 
         C_tissue_free = ph_profiles["C_tissue_free"]   # needed for bile secretion
 
         # ── Module P5 active influx pre-fetch ─────────────────────────────
         Vmax_gut_active     = ac["Vmax_gut_active"]
         Km_gut_active       = ac["Km_gut_active"]
-        gut_active_segments = ac["gut_active_segments"]
+
+        # T12 FIX — Intersect transporter expression window with absorption window.
+        # Active transporters (PEPT1, OCT1, PMAT) must only operate in segments
+        # where the drug is also passively permeable. Without this intersection,
+        # gut_transporter["segments"] ran in the colon regardless of the drug's
+        # declared absorption_segments, over-predicting absorption for
+        # Amoxicillin, Metformin, and Ranitidine.
+        # Sources: diag_pbpk_model.py T12; BODYSIM_ISSUES.md B1.
+        _passive_allowed = set(range(N_ACAT_SEGMENTS))
+        _absorption_segs = drug.get("absorption_segments", None)
+        if _absorption_segs is not None:
+            _passive_allowed = set(int(s) for s in _absorption_segs)
+        gut_active_segments = set(ac["gut_active_segments"]) & _passive_allowed
 
         # Nominal luminal volume per absorptive segment:
         #   250 mL fasted small-intestinal fluid / 6 absorptive segments
@@ -367,29 +384,22 @@ class ACATAbsorptionModule:
             # Incoming transit mass flux [mg/h]
             if i == 0:
                 if enteric_coated:
-                    # Stomach receives no dose-depot inflow; only carries
-                    # whatever transits in from upstream (none, by
-                    # construction) plus any P-gp-reabsorbed efflux.
-                    in_transit = ka_reabs * A_glu_eff
+                    # Stomach receives no dose-depot inflow under enteric coating.
+                    # ka_reabs removed — P-gp efflux no longer recycles here.
+                    in_transit = 0.0
                 else:
                     # Stomach: physiological gastric emptying (kt[0] = 4 h⁻¹).
-                    # P-gp re-absorbed efflux re-enters here as well.
-                    in_transit = kt_arr[0] * A_dose_depot + ka_reabs * A_glu_eff
+                    # ka_reabs removed — P-gp efflux routes to pgp_target_segment.
+                    in_transit = kt_arr[0] * A_dose_depot
             elif i == 1 and enteric_coated:
-                # Duodenum receives the full dose-depot bolus directly
-                # (coating dissolves at duodenal pH), plus normal upstream
-                # transit from the stomach segment.
                 in_transit = kt_arr[0] * A_dose_depot + kt_arr[i - 1] * M_lumen[i - 1]
             else:
                 in_transit = kt_arr[i - 1] * M_lumen[i - 1]
 
-            out_transit = kt_arr[i]     * M_lumen[i]   # [mg/h] → next segment / faeces
-            j_abs_i     = k_abs_arr[i]  * M_lumen[i]   # [mg/h] → enterocyte (passive)
+            out_transit = kt_arr[i]     * M_lumen[i]
+            j_abs_i     = k_abs_arr[i]  * M_lumen[i]
 
             # ── Module P5: Saturable Active Influx ────────────────────────
-            # J_active_i = (Vmax × C_lumen_i) / (Km + C_lumen_i)  [mg/h]
-            # C_lumen_i  = M_lumen[i] / V_seg  [mg/L]
-            # NOT multiplied by F_gut_scalar (SLC substrates bypass CYP3A4).
             J_active_i = 0.0
             if Vmax_gut_active > 0.0 and i in gut_active_segments:
                 M_i = max(0.0, M_lumen[i])
@@ -399,16 +409,21 @@ class ACATAbsorptionModule:
                                  / (Km_gut_active  + C_lumen_i)
 
             # ── Biliary reabsorption source (duodenum only) ────────────────
-            # J_bile_reabs added to LUMEN[1] (ampulla of Vater drains to duodenum).
             _bile_src_i = J_bile_reabs if (i == 1) else 0.0
+
+            # ── P-gp efflux lumen source — dynamic segment routing ─────────
+            # Effluxed mass (from GLU_EFF depot in pbpk_model.py) is injected
+            # into pgp_target_segment — the segment with the highest P-gp
+            # expression weighted by current luminal drug mass (distally
+            # increasing expression per Mouly & Scherrmann 2002; Englund et
+            # al. 2006). This correctly reduces net absorption for P-gp
+            # substrates (Digoxin, Talinolol) without a futile recycling loop.
+            _pgp_src_i = J_glu_eff_to_lumen if (i == pgp_target_segment) else 0.0
 
             # ── Lumen ODE assembly ─────────────────────────────────────────
             dydt_lumen[i] = (in_transit - out_transit - j_abs_i
-                             - J_active_i + _bile_src_i)
+                             - J_active_i + _bile_src_i + _pgp_src_i)
 
-            # ── Module P1: Apply F_gut scalar to passive absorption only ──
-            # Active (SLC) flux is credited at full value; passive flux is
-            # scaled by F_gut_scalar to account for enterocyte CYP3A4/UGT loss.
             total_abs_flux += (j_abs_i * ac["F_gut_scalar"]) + J_active_i
 
         # ── Dose depot ODE ────────────────────────────────────────────────

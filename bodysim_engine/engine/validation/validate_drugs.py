@@ -36,6 +36,14 @@ _ADVANCED_KEYS = [
     "absorption_segments",  # Gap 3 — regional absorption window restriction
     "enteric_coated",       # Gap 4 — enteric-coated release flag
     "peff_is_measured_net", # v5.2 Step 2 — skip f_u when p_eff is human in vivo net Peff
+    "Rb",                   # v5.4 — measured blood:plasma ratio for R&R Ka_AP back-calculation
+                            #        (strong bases pKa > 7 only; eliminates empirical BP fallback)
+    "cl_systemic",          # v5.5 RTT — observed systemic hepatic clearance [L/h] from clinical
+                            #        PK data or FDA label.  Engine back-calculates whole-liver
+                            #        CLint via inverse well-stirred model:
+                            #            CLint = (CL_sys × Q_h) / (fup × (Q_h − CL_sys))
+                            #        Mutually exclusive with "clint" — cl_systemic wins if both
+                            #        are present.  Reference: Ezuruike et al. CPT:PSP 2022.
 ]
 # ──────────────────────────────────────────────────────────────────────────
 

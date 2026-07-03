@@ -228,10 +228,31 @@ class HepaticClearanceModule:
             km_hep         = 1.0
             use_mm_hepatic = False
 
+        # v5.6 T07 FIX: Blood/plasma unit correction for J_cyp.
+        #
+        # CLh (= drug["CLint"] processed by well-stirred model) is on a
+        # BLOOD basis [L blood / h].  C_tissue_free is on a PLASMA basis
+        # [mg / L plasma].  Multiplying directly gives a mixed-unit product.
+        #
+        # Correct dimensional analysis (Rowland & Tozer, §9):
+        #   J_cyp [mg/h] = CLu [L unbound / h] × C_tissue_free [mg/L plasma]
+        # where CLu = fup × CLint (unbound basis).
+        #
+        # Equivalently, convert plasma-free to blood-free:
+        #   C_tissue_free_blood = C_tissue_free / Rb
+        # then:
+        #   J_cyp = CLh_blood × C_tissue_free_blood
+        #         = CLh × C_tissue_free / Rb
+        #
+        # For Rb = 1.0: no change. For Rb ≠ 1 (Propranolol Rb=0.87,
+        # Metoprolol Rb=1.04): corrects a 4–13% systematic J_cyp error.
+        # Reference: diag_pbpk_model.py T07; Act_as_a_Principal_
+        # Pharmacometrician__I_am_refinin.md §3.
+        _Rb_hep = max(Rb, 1e-6)   # guard against zero (should never occur)
         if use_mm_hepatic:
             J_cyp = (vmax_hep * C_tissue_free) / (km_hep + C_tissue_free)
         else:
-            J_cyp = CLh * C_tissue_free
+            J_cyp = (CLh * C_tissue_free) / _Rb_hep
 
         # ── Module P2: Phase II Conjugation Saturation (SULT / UGT) ──────
         # J_sult = (Vmax_sult × C_tissue_free) / (Km_sult + C_tissue_free)
