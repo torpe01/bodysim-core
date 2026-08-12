@@ -7,6 +7,13 @@ echo "========================================"
 
 # ── Step 1: System dependencies + R ──────────────────────────────────
 echo "[1/5] Installing system dependencies and R..."
+sudo apt-get install -y -qq \
+  r-base r-base-dev \
+  libcurl4-openssl-dev libssl-dev libxml2-dev \
+  libfontconfig1-dev libharfbuzz-dev libfribidi-dev \
+  libfreetype6-dev libpng-dev libtiff5-dev libjpeg-dev \
+  libuv1-dev \
+  libsodium-dev
 sudo apt-get update -qq
 sudo apt-get install -y -qq \
   r-base r-base-dev \
